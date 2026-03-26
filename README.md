@@ -2,6 +2,8 @@
 
 A simple low dependency bash implementation inspired by [claude-hud](https://github.com/jarrodwatts/claude-hud) for Claude Code.
 
+<img width="663" height="23" alt="image" src="https://github.com/user-attachments/assets/f3187a1e-26dd-4c2d-ba90-be9e55f54e81" />
+
 ## What it shows
 
 ```
