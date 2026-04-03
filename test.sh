@@ -15,6 +15,11 @@ run() {
   echo "$1" | bash statusline.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
 }
 
+run_cols() {
+  local cols="$1" json="$2"
+  COLUMNS="$cols" bash -c 'echo "$1" | bash statusline.sh' _ "$json" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
+}
+
 assert_contains() {
   local label="$1" output="$2" expected="$3"
   if echo "$output" | grep -qF "$expected"; then
@@ -166,6 +171,45 @@ section "Environment badges"
 out=$(run "$(with_fields '{"transcript_path":""}')")
 assert_contains "renders without crashing" "$out" "%"
 
+section "Terminal width (COLUMNS)"
+# No COLUMNS set → no wrapping, everything on one line.
+out=$(run "$BASE")
+assert_contains "no COLUMNS: shows duration" "$out" "⏱️"
+assert_contains "no COLUMNS: single line" "$(echo "$out" | wc -l | tr -d ' ')" "1"
+
+# Plenty of width → still fits on one line.
+out=$(run_cols 200 "$BASE")
+assert_contains "wide COLUMNS: shows duration" "$out" "⏱️"
+assert_contains "wide COLUMNS: single line" "$(echo "$out" | wc -l | tr -d ' ')" "1"
+
+# Narrow width → wraps onto multiple lines, but nothing is dropped.
+out=$(run_cols 50 "$BASE")
+line_count=$(echo "$out" | wc -l | tr -d ' ')
+assert_matches "narrow COLUMNS: wraps onto multiple lines" "$line_count" '^[2-9][0-9]*$'
+assert_contains "narrow COLUMNS: keeps model" "$out" "claude-opus-4-6"
+assert_contains "narrow COLUMNS: keeps project" "$out" "$FIXTURE_PROJECT"
+assert_contains "narrow COLUMNS: keeps duration" "$out" "⏱️"
+assert_contains "narrow COLUMNS: keeps cost" "$out" "1.23"
+
+# Every wrapped line respects COLUMNS (small tolerance for emoji-width
+# rounding — the goal is no gross overflow, not pixel-perfect wcwidth).
+too_long=$(echo "$out" | awk -v max=53 'length($0) > max { print }')
+assert_contains "narrow COLUMNS: no line grossly exceeds width" "${too_long:-<none>}" "<none>"
+
+section "Terminal width (todos)"
+TODO_TRANSCRIPT=$(mktemp)
+cat > "$TODO_TRANSCRIPT" <<'EOF'
+{"message":{"content":[{"name":"TodoWrite","input":{"todos":[{"status":"completed","content":"Fix the crash bug in the parser that happens when input is empty"}]}}]}}
+EOF
+TODO_BASE=$(with_fields "$(printf '{"transcript_path":"%s"}' "$TODO_TRANSCRIPT")")
+
+out=$(run "$TODO_BASE")
+assert_contains "no COLUMNS: full todo text" "$out" "happens when input is empty"
+
+out=$(run_cols 40 "$TODO_BASE")
+assert_not_contains "narrow COLUMNS: no ellipsis" "$out" "…"
+assert_contains "narrow COLUMNS: wraps todo, keeps full text" "$(echo "$out" | tr -d '\n')" "happens when input is empty"
+rm -f "$TODO_TRANSCRIPT"
 rm -rf "$FIXTURE_DIR"
 
 # ── Summary ───────────────────────────────────────────────────────────────────

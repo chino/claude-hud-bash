@@ -77,9 +77,9 @@ The time-to-cap estimate (`~1h20m`) is `remaining_tokens ÷ burn_rate`. Color in
 bash test.sh
 ```
 
-## Known limitation
+## Width
 
-Claude Code truncates statusLine output at terminal width and does not pass `COLUMNS` to the subprocess, so the script cannot know the terminal width or reflow on resize. Tracked in [anthropics/claude-code#22115](https://github.com/anthropics/claude-code/issues/22115) — upvote if this affects you.
+The status line wraps across as many lines as needed to fit `COLUMNS` (passed in by Claude Code) — segments and long todo text reflow instead of being dropped or truncated.
 
 ## Customization
 
