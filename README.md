@@ -64,10 +64,13 @@ The time-to-cap estimate (`~1h20m`) is `remaining_tokens ÷ burn_rate`. Color in
    {
      "statusLine": {
        "type": "command",
-       "command": "~/.claude/statusline.sh"
+       "command": "~/.claude/statusline.sh",
+       "refreshInterval": 5
      }
    }
    ```
+
+   `refreshInterval` (seconds, minimum `1`) re-runs the script on a timer, in addition to Claude Code's normal event-driven updates (new message, `/compact`, permission mode change, vim mode toggle). Without it, time-based fields like the reset clock, burn rate, time-to-cap, and ahead/behind counts only refresh when you interact — they'll sit stale during a long tool call or while a subagent runs. Omit it if you'd rather avoid the extra background runs.
 
 3. Reload your Claude Code session.
 
