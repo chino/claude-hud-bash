@@ -175,6 +175,42 @@ out=$(run "$(with_fields "$(printf '{"cwd":"%s"}' "$DETACHED_REPO")")")
 assert_contains "shows short SHA on untagged detached HEAD" "$out" "$SHORT_SHA"
 rm -rf "$DETACHED_REPO"
 
+section "Git branch (ahead/behind)"
+REMOTE_REPO=$(mktemp -d)
+git -C "$REMOTE_REPO" init -q --bare
+
+LOCAL_REPO=$(mktemp -d)
+git -C "$LOCAL_REPO" init -q -b main
+git -C "$LOCAL_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+git -C "$LOCAL_REPO" remote add origin "$REMOTE_REPO"
+git -C "$LOCAL_REPO" push -q origin main
+git -C "$LOCAL_REPO" branch -q --set-upstream-to=origin/main main
+
+# In sync → no arrows.
+out=$(run "$(with_fields "$(printf '{"cwd":"%s"}' "$LOCAL_REPO")")")
+assert_not_contains "no arrows when in sync" "$out" "↑"
+assert_not_contains "no arrows when in sync" "$out" "↓"
+
+# 2 ahead → up arrow with count, no down arrow.
+git -C "$LOCAL_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m a1
+git -C "$LOCAL_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m a2
+out=$(run "$(with_fields "$(printf '{"cwd":"%s"}' "$LOCAL_REPO")")")
+assert_contains "shows ahead count" "$out" "↑2"
+assert_not_contains "no down arrow when only ahead" "$out" "↓"
+
+# Push, then have origin move ahead → down arrow with count, no up arrow.
+git -C "$LOCAL_REPO" push -q origin main
+CLONE_REPO=$(mktemp -d)
+git clone -q "$REMOTE_REPO" "$CLONE_REPO"
+git -C "$CLONE_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m b1
+git -C "$CLONE_REPO" push -q origin main
+git -C "$LOCAL_REPO" fetch -q
+out=$(run "$(with_fields "$(printf '{"cwd":"%s"}' "$LOCAL_REPO")")")
+assert_contains "shows behind count" "$out" "↓1"
+assert_not_contains "no up arrow when only behind" "$out" "↑"
+
+rm -rf "$REMOTE_REPO" "$LOCAL_REPO" "$CLONE_REPO"
+
 section "Missing / null fields"
 out=$(run '{}')
 assert_contains "handles empty JSON" "$out" '?'

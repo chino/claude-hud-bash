@@ -102,6 +102,15 @@ if [[ -z $branch ]]; then
 fi
 dirty_count=$(git -C "$cwd" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
 
+ahead=0 behind=0
+if [[ -n $branch ]]; then
+  read -r ahead behind < <(git -C "$cwd" rev-list --left-right --count 'HEAD...@{u}' 2>/dev/null)
+  ahead=${ahead:-0}; behind=${behind:-0}
+fi
+ahead_behind=""
+(( ahead > 0 ))  && ahead_behind+="↑${ahead}"
+(( behind > 0 )) && ahead_behind+="↓${behind}"
+
 # ── Environment counts ────────────────────────────────────────────────────────
 claude_mds=$(find "$cwd" -name "CLAUDE.md" 2>/dev/null | wc -l | tr -d ' ')
 mcps=$(jq -r '(.mcpServers // {}) | length' ~/.claude/settings.json 2>/dev/null || echo 0)
@@ -162,7 +171,7 @@ segments=("${CYAN}[${model}]${RESET}")
 
 if [[ -n $branch ]]; then
   dirty_flag=""; (( dirty_count > 0 )) && dirty_flag="*"
-  segments+=("${YELLOW}${project}${RESET} ${MAGENTA}git:(${CYAN}${branch}${dirty_flag}${MAGENTA})${RESET}")
+  segments+=("${YELLOW}${project}${RESET} ${MAGENTA}git:(${CYAN}${branch}${dirty_flag}${ahead_behind}${MAGENTA})${RESET}")
 else
   segments+=("${YELLOW}${project}${RESET}")
 fi
