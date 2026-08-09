@@ -84,6 +84,10 @@ bash test.sh
 
 The status line wraps across as many lines as needed to fit `COLUMNS` (passed in by Claude Code) — segments and long todo text reflow instead of being dropped or truncated.
 
+### When it redraws
+
+Claude Code only re-runs the script on specific triggers: a new assistant message, `/compact` finishing, a permission-mode change, a vim-mode toggle, or the `refreshInterval` timer if you've set one. **Terminal resize is not one of them** — if you resize the window or a pane, the status line keeps rendering at the old width until the next trigger fires. This is a known upstream gap, not a bug in this script: [anthropics/claude-code#76988](https://github.com/anthropics/claude-code/issues/76988). Setting `refreshInterval` (see [Install](#install)) bounds how long a resize stays stale, at the cost of a script run every N seconds.
+
 ## Customization
 
 `statusline.sh` is straightforward bash — edit it directly, or ask Claude to update it for you in real time.
