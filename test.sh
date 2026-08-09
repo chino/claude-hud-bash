@@ -157,6 +157,24 @@ section "Git branch"
 out=$(run "$BASE")
 assert_contains "shows project name" "$out" "$FIXTURE_PROJECT"
 
+section "Git branch (detached HEAD)"
+DETACHED_REPO=$(mktemp -d)
+git -C "$DETACHED_REPO" init -q
+git -C "$DETACHED_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m first
+git -C "$DETACHED_REPO" tag v1.0.0
+git -C "$DETACHED_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m second
+git -C "$DETACHED_REPO" checkout -q --detach v1.0.0
+
+out=$(run "$(with_fields "$(printf '{"cwd":"%s"}' "$DETACHED_REPO")")")
+assert_contains "shows exact tag on detached HEAD" "$out" "v1.0.0"
+
+git -C "$DETACHED_REPO" checkout -q --detach HEAD~0 2>/dev/null
+git -C "$DETACHED_REPO" tag -d v1.0.0 >/dev/null
+SHORT_SHA=$(git -C "$DETACHED_REPO" rev-parse --short HEAD)
+out=$(run "$(with_fields "$(printf '{"cwd":"%s"}' "$DETACHED_REPO")")")
+assert_contains "shows short SHA on untagged detached HEAD" "$out" "$SHORT_SHA"
+rm -rf "$DETACHED_REPO"
+
 section "Missing / null fields"
 out=$(run '{}')
 assert_contains "handles empty JSON" "$out" '?'

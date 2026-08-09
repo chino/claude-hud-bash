@@ -92,6 +92,14 @@ fi
 
 # ── Git info ──────────────────────────────────────────────────────────────────
 branch=$(git -C "$cwd" branch --show-current 2>/dev/null)
+# Detached HEAD (rebase, checked-out tag/commit, etc.) — fall back to an
+# exact tag match, then a short commit SHA, instead of showing nothing.
+if [[ -z $branch ]]; then
+  branch=$(git -C "$cwd" describe --tags --exact-match 2>/dev/null)
+fi
+if [[ -z $branch ]]; then
+  branch=$(git -C "$cwd" rev-parse --short HEAD 2>/dev/null)
+fi
 dirty_count=$(git -C "$cwd" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
 
 # ── Environment counts ────────────────────────────────────────────────────────
