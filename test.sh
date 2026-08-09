@@ -211,6 +211,20 @@ assert_not_contains "no up arrow when only behind" "$out" "↑"
 
 rm -rf "$REMOTE_REPO" "$LOCAL_REPO" "$CLONE_REPO"
 
+section "Compaction count"
+COMPACT_TRANSCRIPT=$(mktemp)
+cat > "$COMPACT_TRANSCRIPT" <<'EOF'
+{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}
+{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}
+EOF
+COMPACT_BASE=$(with_fields "$(printf '{"transcript_path":"%s"}' "$COMPACT_TRANSCRIPT")")
+out=$(run "$COMPACT_BASE")
+assert_contains "shows compaction count next to ctx" "$out" "↻ 2"
+rm -f "$COMPACT_TRANSCRIPT"
+
+out=$(run "$BASE")
+assert_not_contains "hidden when no compactions" "$out" "↻"
+
 section "Missing / null fields"
 out=$(run '{}')
 assert_contains "handles empty JSON" "$out" '?'

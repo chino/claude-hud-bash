@@ -22,6 +22,9 @@ cwd=$(echo "$data" | jq -r '.cwd // ""')
 project=$(basename "$cwd")
 transcript=$(echo "$data" | jq -r '.transcript_path // ""')
 
+compactions=0
+[[ -n $transcript && -f $transcript ]] && compactions=$(grep -c '"subtype":"compact_boundary"' "$transcript" 2>/dev/null || echo 0)
+
 # ── Plan token budget ─────────────────────────────────────────────────────────
 # Cached for 60s — credentials rarely change and jq parsing adds latency.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-hud"
@@ -176,7 +179,9 @@ else
   segments+=("${YELLOW}${project}${RESET}")
 fi
 
-segments+=("${DIM}ctx${RESET} ${ctx_bar} ${CTX_COLOR}${ctx}%${RESET}")
+compact_label=""
+(( compactions > 0 )) && compact_label=" ${DIM}↻ ${compactions}${RESET}"
+segments+=("${DIM}ctx${RESET} ${ctx_bar} ${CTX_COLOR}${ctx}%${RESET}${compact_label}")
 segments+=("${DIM}5h${RESET} ${usage_bar} ${USAGE_COLOR}${usage_5h}%${reset_label}${RESET}")
 [[ -n $burn_label ]] && segments+=("${burn_label}${ttc_label}")
 
