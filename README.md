@@ -8,7 +8,7 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 ## What it shows
 
 ```
-[Opus 4.6] │ my-project git:(main*) │ ctx ████░░░░░░ 23% │ 5h ██░░░░░░░░ 22% 7pm │ 🔥 12k/m ~1h20m │ 🔌2 🪝3 │ $0.04 │ ⏱️ 5m
+[Opus 4.6] │ my-project git:(main*↑2↓1) │ ctx ████░░░░░░ 23% ↻ 1 │ 5h ██░░░░░░░░ 22% 7pm │ 🔥 12k/m ~1h20m │ 🔌2 🪝3 │ $0.04 │ ⏱️ 5m
 ✓ Fix the crash bug
 ▶ Write tests
 ○ Update docs
@@ -17,8 +17,8 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 | Element | Example | Description |
 |---------|---------|-------------|
 | **Model** | `[Opus 4.6]` | The Claude model currently in use |
-| **Project** | `my-project git:(main*)` | Current directory name and git branch. `*` means uncommitted changes |
-| **Context** | `ctx ████░░░░░░ 23%` | Context window usage. Turns yellow at 70%, red at 85% |
+| **Project** | `my-project git:(main*↑2↓1)` | Current directory name and git branch. `*` means uncommitted changes; `↑N`/`↓N` show commits ahead/behind the upstream (only when tracking a remote and diverged). On detached HEAD, falls back to an exact tag match, then a short commit SHA, instead of showing nothing |
+| **Context** | `ctx ████░░░░░░ 23% ↻ 1` | Context window usage. Turns yellow at 70%, red at 85%. The dim `↻ N` (shown only when non-zero) counts compactions in the transcript, so a sudden drop in usage isn't confusing |
 | **5h usage** | `5h ██░░░░░░░░ 22% 7pm` | Rolling 5-hour rate limit consumption + estimated reset time. Turns magenta at 75%, red at 90% |
 | **Burn rate** | `🔥 12k/m ~1h20m` | Tokens/min consumed in this window, plus estimated time until you hit the cap at the current rate |
 | **Env** | `📋1 🔌2 🪝3` | Count of CLAUDE.md files (📋), MCP servers (🔌), and hooks (🪝). Only shown when non-zero |
