@@ -209,24 +209,4 @@ done
 
 printf '%s\n' "${lines[@]}"
 
-# ── Todos ─────────────────────────────────────────────────────────────────────
-if [[ -n $transcript && -f $transcript ]]; then
-  todos=$(grep '"TodoWrite"' "$transcript" 2>/dev/null | tail -1 | jq -r '
-    .message.content[]? | select(.name=="TodoWrite") | .input.todos[]? |
-    if .status == "completed" then "✓ \(.content)"
-    elif .status == "in_progress" then "▶ \(.content)"
-    else "○ \(.content)"
-    end' 2>/dev/null)
-  if [[ -n $todos ]]; then
-    while IFS= read -r todo_line; do
-      rest="$todo_line"
-      while (( cols > 0 )) && (( ${#rest} > cols )); do
-        printf '%s\n' "${rest:0:cols}"
-        rest="${rest:cols}"
-      done
-      printf '%s\n' "$rest"
-    done <<< "$todos"
-  fi
-fi
-
 exit 0

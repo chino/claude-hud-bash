@@ -9,9 +9,6 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 
 ```
 [Opus 4.6] │ my-project git:(main*↑2↓1) │ ctx ████░░░░░░ 23% ↻ 1 │ 5h ██░░░░░░░░ 22% 7pm │ 🔥 12k/m ~1h20m │ 🔌2 🪝3 │ $0.04 │ ⏱️ 5m
-✓ Fix the crash bug
-▶ Write tests
-○ Update docs
 ```
 
 | Element | Example | Description |
@@ -24,8 +21,6 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 | **Env** | `📋1 🔌2 🪝3` | Count of CLAUDE.md files (📋), MCP servers (🔌), and hooks (🪝). Only shown when non-zero |
 | **Cost** | `$0.04` | Total API cost for the current session |
 | **Duration** | `⏱️ 5m` | How long the current Claude Code session has been running |
-
-**Todos:** If Claude has used TodoWrite during the session, the current task list is shown below the status line: `✓` completed, `▶` in progress, `○` pending.
 
 ### Reset time
 
@@ -83,7 +78,7 @@ bash test.sh
 
 ## Width
 
-The status line wraps across as many lines as needed to fit `COLUMNS` (passed in by Claude Code) — segments and long todo text reflow instead of being dropped or truncated.
+The status line wraps across as many lines as needed to fit `COLUMNS` (passed in by Claude Code) — segments reflow instead of being dropped or truncated.
 
 ### When it redraws
 
