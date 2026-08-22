@@ -178,6 +178,7 @@ rm -rf "$DETACHED_REPO"
 section "Git branch (ahead/behind)"
 REMOTE_REPO=$(mktemp -d)
 git -C "$REMOTE_REPO" init -q --bare
+git -C "$REMOTE_REPO" symbolic-ref HEAD refs/heads/main
 
 LOCAL_REPO=$(mktemp -d)
 git -C "$LOCAL_REPO" init -q -b main
