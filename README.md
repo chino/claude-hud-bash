@@ -50,8 +50,6 @@ so the two are never confused at a glance.
 ### Burn rate & time-to-cap
 
 > **Note:** These are rough estimates. The statusline data exposes `used_percentage` (token consumption) and `resets_at` (window close time) but not `window_started_at` or absolute token counts. Until Claude Code exposes that data, the burn rate and time-to-cap use approximations that will improve over time.
->
-> Relevant upstream issues: [#9617](https://github.com/anthropics/claude-code/issues/9617) (`window_started_at`), [#11535](https://github.com/anthropics/claude-code/issues/11535) / [#36056](https://github.com/anthropics/claude-code/issues/36056) (absolute token counts).
 
 Burn rate is computed as `tokens_used_in_window ÷ elapsed_window_minutes`, where token budget is read from `~/.claude/.credentials.json` based on your plan:
 
