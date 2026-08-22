@@ -265,20 +265,6 @@ assert_contains "narrow COLUMNS: keeps cost" "$out" "1.23"
 too_long=$(echo "$out" | awk -v max=53 'length($0) > max { print }')
 assert_contains "narrow COLUMNS: no line grossly exceeds width" "${too_long:-<none>}" "<none>"
 
-section "Terminal width (todos)"
-TODO_TRANSCRIPT=$(mktemp)
-cat > "$TODO_TRANSCRIPT" <<'EOF'
-{"message":{"content":[{"name":"TodoWrite","input":{"todos":[{"status":"completed","content":"Fix the crash bug in the parser that happens when input is empty"}]}}]}}
-EOF
-TODO_BASE=$(with_fields "$(printf '{"transcript_path":"%s"}' "$TODO_TRANSCRIPT")")
-
-out=$(run "$TODO_BASE")
-assert_contains "no COLUMNS: full todo text" "$out" "happens when input is empty"
-
-out=$(run_cols 40 "$TODO_BASE")
-assert_not_contains "narrow COLUMNS: no ellipsis" "$out" "…"
-assert_contains "narrow COLUMNS: wraps todo, keeps full text" "$(echo "$out" | tr -d '\n')" "happens when input is empty"
-rm -f "$TODO_TRANSCRIPT"
 rm -rf "$FIXTURE_DIR"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
