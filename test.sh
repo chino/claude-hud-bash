@@ -64,6 +64,7 @@ section() { echo; echo "${BOLD}${CYAN}$1${RESET}"; }
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 FUTURE=$(( $(date +%s) + 7200 ))
+WEEK_FUTURE=$(( $(date +%s) + 3 * 86400 ))
 
 # Non-git fixture directory, not the machine's own checkout — keeps the
 # suite portable and free of any local path/username.
@@ -119,6 +120,46 @@ assert_matches "shows clock time next to 5h%" "$out" '[0-9]+:[0-9]+(am|pm)'
 out=$(run "$(with_fields '{"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":0}}}')")
 assert_not_contains "no clock time without resets_at" "$out" "am"
 assert_not_contains "no clock time without resets_at" "$out" "pm"
+
+section "Weekly (7-day) usage"
+weekly() {
+  with_fields '{"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":'"$FUTURE"'},
+                "seven_day":{"used_percentage":'"$1"',"resets_at":'"${2:-$WEEK_FUTURE}"'}}}'
+}
+
+# Hidden by default — BASE carries no seven_day window at all.
+out=$(run "$BASE")
+assert_not_contains "hidden when there is no weekly window" "$out" "7d "
+
+# Hidden below the threshold, shown at it. Default WEEKLY_SHOW_AT_REMAINING=80
+# means it appears from 20% used onward.
+out=$(run "$(weekly 19)")
+assert_not_contains "hidden below the threshold" "$out" "7d "
+
+out=$(run "$(weekly 20)")
+assert_contains "shown at the threshold" "$out" "7d "
+assert_contains "shows weekly percentage" "$out" "20%"
+
+out=$(run "$(weekly 93)")
+assert_contains "shows high weekly percentage" "$out" "93%"
+
+# Sits immediately to the right of the 5h window.
+out=$(run "$(weekly 42)")
+assert_matches "sits right of the 5h segment" "$out" '5h .*55%.*│ 7d '
+
+# Reset label: weekday when it is days out, clock time when it lands today.
+assert_matches "shows weekday when days away" "$out" '7d [^│]*(mon|tue|wed|thu|fri|sat|sun)'
+
+out=$(run "$(weekly 88 "$(( $(date +%s) + 4000 ))")")
+assert_matches "shows clock time when resetting today" "$out" '7d [^│]*[0-9]+:[0-9]+(am|pm)'
+
+# resets_at is documented as an ISO 8601 string; accept that as well as epoch.
+out=$(run "$(weekly 64 "\"$(date -Iseconds -d "@$WEEK_FUTURE")\"")")
+assert_contains "handles ISO 8601 resets_at" "$out" "64%"
+
+# Threshold is tunable from the environment.
+out=$(WEEKLY_SHOW_AT_REMAINING=100 bash -c 'echo "$1" | bash statusline.sh' _ "$(weekly 3)" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "WEEKLY_SHOW_AT_REMAINING=100 always shows it" "$out" "7d "
 
 section "Burn rate & time-to-cap"
 # resets_at 1h in past = window 4h elapsed, 55% used → should show burn rate

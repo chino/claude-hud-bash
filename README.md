@@ -8,7 +8,7 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 ## What it shows
 
 ```
-[Opus 4.6] │ my-project git:(main*↑2↓1) │ ctx ████░░░░░░ 23% ↻ 1 │ 5h ██░░░░░░░░ 22% 7pm │ 🔥 12k/m ~1h20m │ 🔌2 🪝3 │ $0.04 │ ⏱️ 5m
+[Opus 4.6] │ my-project git:(main*↑2↓1) │ ctx ████░░░░░░ 23% ↻ 1 │ 5h ██░░░░░░░░ 22% 7pm │ 7d ████░░░░░░ 41% sat │ 🔥 12k/m ~1h20m │ 🔌2 🪝3 │ $0.04 │ ⏱️ 5m
 ```
 
 | Element | Example | Description |
@@ -17,6 +17,7 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 | **Project** | `my-project git:(main*↑2↓1)` | Current directory name and git branch. `*` means uncommitted changes; `↑N`/`↓N` show commits ahead/behind the upstream (only when tracking a remote and diverged). On detached HEAD, falls back to an exact tag match, then a short commit SHA, instead of showing nothing |
 | **Context** | `ctx ████░░░░░░ 23% ↻ 1` | Context window usage. Turns yellow at 70%, red at 85%. The dim `↻ N` (shown only when non-zero) counts compactions in the transcript, so a sudden drop in usage isn't confusing |
 | **5h usage** | `5h ██░░░░░░░░ 22% 7pm` | Rolling 5-hour rate limit consumption + estimated reset time. Turns magenta at 75%, red at 90% |
+| **7d usage** | `7d ████░░░░░░ 41% sat` | Rolling 7-day rate limit consumption + reset. Hidden until it is worth the space — see [Weekly window](#weekly-window). Cyan by default, yellow at 75%, red at 90% |
 | **Burn rate** | `🔥 12k/m ~1h20m` | Tokens/min consumed in this window, plus estimated time until you hit the cap at the current rate |
 | **Env** | `📋1 🔌2 🪝3` | Count of CLAUDE.md files (📋), MCP servers (🔌), and hooks (🪝). Only shown when non-zero |
 | **Cost** | `$0.04` | Total API cost for the current session |
@@ -25,6 +26,26 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 ### Reset time
 
 The reset clock time (`7pm`) next to the 5h bar comes from `resets_at` in the Claude Code statusline data — always accurate, no estimation.
+
+### Weekly window
+
+The `7d` segment sits immediately right of the 5h one and reads
+`rate_limits.seven_day` from the statusline data. It is **hidden until remaining
+drops to 80%** — i.e. from 20% used onward — so it costs nothing on the status
+line early in the week and appears once it is worth watching.
+
+Its reset label is the weekday (`sat`) while the reset is more than 24h out, and
+switches to a clock time (`9:15pm`) on the day itself.
+
+Two knobs, both overridable from the environment:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `WEEKLY_SHOW_AT_REMAINING` | `80` | Show the segment once remaining is at or below this percent. `100` always shows it, `0` holds it back until the window is fully consumed |
+| `WEEKLY_BAR_WIDTH` | `10` | Bar width in cells, matching the other bars |
+
+The colour ramp is deliberately a different hue from the 5h bar's blue/magenta
+so the two are never confused at a glance.
 
 ### Burn rate & time-to-cap
 

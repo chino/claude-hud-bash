@@ -11,16 +11,34 @@ GREEN=$'\e[32m'
 RED=$'\e[31m'
 BRIGHT_BLUE=$'\e[94m'
 BRIGHT_MAGENTA=$'\e[95m'
+BRIGHT_CYAN=$'\e[96m'
+
+# Weekly (7-day) window: hidden until it is worth the space. Shown once
+# remaining drops to WEEKLY_SHOW_AT_REMAINING percent or less — i.e. at the
+# default of 80, from 20% used onward. Set to 100 to always show it.
+WEEKLY_SHOW_AT_REMAINING=${WEEKLY_SHOW_AT_REMAINING:-80}
+WEEKLY_BAR_WIDTH=${WEEKLY_BAR_WIDTH:-10}
 
 model=$(echo "$data" | jq -r '.model.display_name // "?"')
 ctx=$(echo "$data" | jq -r '.context_window.used_percentage // 0 | floor')
 cost=$(echo "$data" | jq -r '.cost.total_cost_usd // 0 | "$\(. * 100 | round | . / 100)"')
 usage_5h=$(echo "$data" | jq -r '.rate_limits.five_hour.used_percentage // 0 | floor')
 resets_at=$(echo "$data" | jq -r '.rate_limits.five_hour.resets_at // 0')
+usage_7d=$(echo "$data" | jq -r '.rate_limits.seven_day.used_percentage // 0 | floor')
+resets_7d=$(echo "$data" | jq -r '.rate_limits.seven_day.resets_at // 0')
 duration_ms=$(echo "$data" | jq -r '.cost.total_duration_ms // 0')
 cwd=$(echo "$data" | jq -r '.cwd // ""')
 project=$(basename "$cwd")
 transcript=$(echo "$data" | jq -r '.transcript_path // ""')
+
+to_epoch() {
+  local v=$1
+  [[ -z $v || $v == null ]] && { echo 0; return; }
+  [[ $v =~ ^[0-9]+$ ]] && { echo "$v"; return; }
+  date -d "$v" +%s 2>/dev/null || echo 0
+}
+resets_at=$(to_epoch "$resets_at")
+resets_7d=$(to_epoch "$resets_7d")
 
 compactions=0
 [[ -n $transcript && -f $transcript ]] && compactions=$(grep -c '"subtype":"compact_boundary"' "$transcript" 2>/dev/null || echo 0)
@@ -128,6 +146,10 @@ if   (( usage_5h >= 90 )); then USAGE_COLOR=$RED
 elif (( usage_5h >= 75 )); then USAGE_COLOR=$BRIGHT_MAGENTA
 else USAGE_COLOR=$BRIGHT_BLUE; fi
 
+if   (( usage_7d >= 90 )); then WEEKLY_COLOR=$RED
+elif (( usage_7d >= 75 )); then WEEKLY_COLOR=$YELLOW
+else WEEKLY_COLOR=$BRIGHT_CYAN; fi
+
 # ── Reset time ────────────────────────────────────────────────────────────────
 reset_label=""
 if (( resets_at > now )); then
@@ -135,10 +157,20 @@ if (( resets_at > now )); then
   reset_label=" ${reset_time}"
 fi
 
+weekly_reset_label=""
+if (( resets_7d > now )); then
+  if (( resets_7d - now < 86400 )); then
+    weekly_reset_label=" $(date -d "@$resets_7d" "+%-I:%M%p" 2>/dev/null | tr '[:upper:]' '[:lower:]' | sed 's/:00//')"
+  else
+    weekly_reset_label=" $(date -d "@$resets_7d" "+%a" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  fi
+fi
+
 # ── Bars ──────────────────────────────────────────────────────────────────────
 make_bar() {
-  local pct=$1 color=$2
-  local filled=$(( pct / 10 )) empty=$(( 10 - pct / 10 ))
+  local pct=$1 color=$2 width=${3:-10}
+  (( pct < 0 )) && pct=0; (( pct > 100 )) && pct=100
+  local filled=$(( pct * width / 100 )) empty=$(( width - pct * width / 100 ))
   local bar="${color}"
   for _ in $(seq 1 $filled 2>/dev/null); do bar="${bar}█"; done
   bar="${bar}${DIM}"
@@ -148,6 +180,7 @@ make_bar() {
 
 ctx_bar=$(make_bar "$ctx" "$CTX_COLOR")
 usage_bar=$(make_bar "$usage_5h" "$USAGE_COLOR")
+weekly_bar=$(make_bar "$usage_7d" "$WEEKLY_COLOR" "$WEEKLY_BAR_WIDTH")
 
 # ── Terminal width ────────────────────────────────────────────────────────────
 # Claude Code passes the terminal width via COLUMNS. Falls back to 0 (no
@@ -183,6 +216,8 @@ compact_label=""
 (( compactions > 0 )) && compact_label=" ${DIM}↻ ${compactions}${RESET}"
 segments+=("${DIM}ctx${RESET} ${ctx_bar} ${CTX_COLOR}${ctx}%${RESET}${compact_label}")
 segments+=("${DIM}5h${RESET} ${usage_bar} ${USAGE_COLOR}${usage_5h}%${reset_label}${RESET}")
+(( usage_7d >= 100 - WEEKLY_SHOW_AT_REMAINING )) && \
+  segments+=("${DIM}7d${RESET} ${weekly_bar} ${WEEKLY_COLOR}${usage_7d}%${weekly_reset_label}${RESET}")
 [[ -n $burn_label ]] && segments+=("${burn_label}${ttc_label}")
 
 env=""
