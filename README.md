@@ -8,7 +8,7 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 ## What it shows
 
 ```
-[Opus 4.6] │ my-project git:(main*↑2↓1) │ ctx ████░░░░░░ 23% ↻ 1 │ 5h ██░░░░░░░░ 22% 7pm │ 7d ████░░░░░░ 41% sat │ 🔥 12k/m ~1h20m │ 🔌2 🪝3 │ $0.04 │ ⏱️ 5m
+[Opus 4.6] │ my-project git:(main*↑2↓1) │ ctx ████░░░░░░ 23% ↻ 1 │ warm ~54m hit 87% │ 5h ██░░░░░░░░ 22% 7pm │ 7d ████░░░░░░ 41% sat │ 🔥 12k/m ~1h20m │ 🔌2 🪝3 │ $0.04 │ ⏱️ 5m
 ```
 
 | Element | Example | Description |
@@ -16,6 +16,7 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 | **Model** | `[Opus 4.6]` | The Claude model currently in use |
 | **Project** | `my-project git:(main*↑2↓1)` | Current directory name and git branch. `*` means uncommitted changes; `↑N`/`↓N` show commits ahead/behind the upstream (only when tracking a remote and diverged). On detached HEAD, falls back to an exact tag match, then a short commit SHA, instead of showing nothing |
 | **Context** | `ctx ████░░░░░░ 23% ↻ 1` | Context window usage. Turns yellow at 70%, red at 85%. The dim `↻ N` (shown only when non-zero) counts compactions in the transcript, so a sudden drop in usage isn't confusing |
+| **Prompt cache** | `warm ~54m hit 87%` / `cold 829.5k 2-3% 5h` | Whether the main conversation's prompt cache is warm or cold, from `prompt_cache.warm`. Green while warm, shifting to yellow inside the last 20% of the TTL, red once cold. **Warm**: a countdown to `expires_at`, plus `hit N%` — the cache hit ratio. **Cold**: the tokens the next turn re-writes into the cache, then what that costs as a share of your 5-hour window under two independent estimates (see [Cold reheat cost](#cold-reheat-cost) and [docs/cold-reheat.md](docs/cold-reheat.md)); the hit ratio is dropped here since it's a backward-looking stat, not something that changes what the next turn costs. Hidden until the first API response of the session, since `prompt_cache` isn't in the payload before then |
 | **5h usage** | `5h ██░░░░░░░░ 22% 7pm` | Rolling 5-hour rate limit consumption + estimated reset time. Turns magenta at 75%, red at 90% |
 | **7d usage** | `7d ████░░░░░░ 41% sat` | Rolling 7-day rate limit consumption + reset. Hidden until it is worth the space — see [Weekly window](#weekly-window). Cyan by default, yellow at 75%, red at 90% |
 | **Burn rate** | `🔥 12k/m ~1h20m` | Tokens/min consumed in this window, plus estimated time until you hit the cap at the current rate |
@@ -51,15 +52,48 @@ so the two are never confused at a glance.
 
 > **Note:** These are rough estimates. The statusline data exposes `used_percentage` (token consumption) and `resets_at` (window close time) but not `window_started_at` or absolute token counts. Until Claude Code exposes that data, the burn rate and time-to-cap use approximations that will improve over time.
 
-Burn rate is computed as `tokens_used_in_window ÷ elapsed_window_minutes`, where token budget is read from `~/.claude/.credentials.json` based on your plan:
+Burn rate is computed as `tokens_used_in_window ÷ elapsed_window_minutes`, where token budget is detected from your plan, using `subscriptionType` and `rateLimitTier` in `~/.claude/.credentials.json`:
 
-| Plan | Token budget (5h) |
-|------|-------------------|
-| Pro | ~88,000 |
-| Max 5× | ~440,000 |
-| Max 20× | ~1,760,000 |
+| Plan | `rateLimitTier` | Token budget (5h) |
+|------|-----------------|-------------------|
+| Pro | `default_claude_pro` | ~88,000 |
+| Max 5× | `default_claude_max_5x` | ~440,000 |
+| Max 20× | `default_claude_max_20x` | ~1,760,000 |
+
+The tier is matched as a substring, since Anthropic reports it as a decorated slug (`default_claude_max_5x`, not `max_5x`). A `max` plan with an unrecognized tier falls back to the 5× budget; anything else falls back to the Pro budget. Upgrades are picked up automatically on the next render — the budget is re-read from the credentials file, not baked in — though the credentials file itself only refreshes when Claude Code renews its token, so a fresh upgrade may need a session restart (or `claude auth logout && claude auth login`) to show up.
+
+Set `CLAUDE_HUD_TOKEN_BUDGET` to override the table entirely if your plan isn't covered or you'd rather calibrate the number yourself.
+
+> **Known limitation:** these token figures are the *old* plan constants, and the calibration described in [docs/cold-reheat.md](docs/cold-reheat.md) shows that no single token count describes a 5-hour window — so burn rate and time-to-cap inherit that error. The cold reheat cost no longer uses them. Converting these two to the same cents-based budget (or to a constant-free `%/h`, since `used_percentage` and `resets_at` are enough on their own) is the next thing to fix.
 
 The time-to-cap estimate (`~1h20m`) is `remaining_tokens ÷ burn_rate`. Color indicates urgency: dim when >2h, yellow 1–2h, red <1h. It disappears at 100% usage. The budget is cached for 60s to avoid parsing latency on every render.
+
+### Cold reheat cost
+
+While the cache is cold the segment shows what the next turn costs to re-cache:
+the token count from the payload, then that priced as a share of the 5-hour
+window under two independent estimates, rendered as a range with the low end
+first.
+
+```
+cold 829.5k 2-3% 5h     both estimates
+cold 829.5k 3% 5h       they round the same, or only one resolved
+cold 100k <1-2% 5h      low end rounds below a percent
+cold 60k <1% 5h         both round below a percent
+cold 1.2M to reheat     no budget available — never invents one
+```
+
+The window is measured in API-equivalent cents, not tokens, and the second
+estimate is self-calibrated from your own usage. Cents never reach the display.
+See **[docs/cold-reheat.md](docs/cold-reheat.md)** for the formula, the
+measurements behind it, and the `CLAUDE_HUD_*` overrides.
+
+### No 7-day equivalent
+
+The weekly window only exposes `used_percentage`, and weekly limits are subject
+to promotions that shift the denominator without notice. The reported
+percentage already accounts for them, so it is shown as-is and nothing is
+divided by a guessed weekly cap.
 
 ## Requirements
 
@@ -101,7 +135,7 @@ The status line wraps across as many lines as needed to fit `COLUMNS` (passed in
 
 ### When it redraws
 
-Claude Code only re-runs the script on specific triggers: a new assistant message, `/compact` finishing, a permission-mode change, a vim-mode toggle, or the `refreshInterval` timer if you've set one. **Terminal resize is not one of them** — if you resize the window or a pane, the status line keeps rendering at the old width until the next trigger fires. This is a known upstream gap, not a bug in this script: [anthropics/claude-code#76988](https://github.com/anthropics/claude-code/issues/76988). Setting `refreshInterval` (see [Install](#install)) bounds how long a resize stays stale, at the cost of a script run every N seconds.
+Claude Code only re-runs the script on specific triggers: a new assistant message, `/compact` finishing, a permission-mode change, a vim-mode toggle, a warm prompt cache reaching its `expires_at` (so the cache segment above flips to cold right on schedule, even mid-tool-call), the 5-hour rate-limit window hitting its own `resets_at`, or the `refreshInterval` timer if you've set one. **Terminal resize is not one of them** — if you resize the window or a pane, the status line keeps rendering at the old width until the next trigger fires. This is a known upstream gap, not a bug in this script: [anthropics/claude-code#76988](https://github.com/anthropics/claude-code/issues/76988). Setting `refreshInterval` (see [Install](#install)) bounds how long a resize stays stale, at the cost of a script run every N seconds.
 
 ## Customization
 

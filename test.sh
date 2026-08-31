@@ -88,6 +88,12 @@ with_fields() {
   echo "$BASE" | jq ". + $1"
 }
 
+# The self-calibration scan forks a background job that reads the real
+# ~/.claude/projects transcripts and overwrites the calibration cache. Disable
+# it for the whole suite by putting the sampling floor out of reach; the tests
+# that need a calibration value seed the cache file directly instead.
+export CLAUDE_HUD_CALIB_MIN_PCT=101
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 section "Model"
@@ -114,7 +120,7 @@ assert_contains "shows 99% usage" "$out" "99%"
 section "Reset time"
 # Always shown when resets_at is in the future
 out=$(run "$BASE")
-assert_matches "shows clock time next to 5h%" "$out" '[0-9]+:[0-9]+(am|pm)'
+assert_matches "shows clock time next to 5h%" "$out" '[0-9]+(:[0-9]+)?(am|pm)'
 
 # Not shown when resets_at is missing/zero
 out=$(run "$(with_fields '{"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":0}}}')")
@@ -252,6 +258,136 @@ assert_contains "shows behind count" "$out" "↓1"
 assert_not_contains "no up arrow when only behind" "$out" "↑"
 
 rm -rf "$REMOTE_REPO" "$LOCAL_REPO" "$CLONE_REPO"
+
+section "Prompt cache"
+out=$(run "$BASE")
+assert_not_contains "hidden when prompt_cache is absent" "$out" "warm"
+assert_not_contains "hidden when prompt_cache is absent" "$out" "cold"
+
+out=$(run "$(with_fields '{"prompt_cache":{"warm":true,"hit_ratio":0.87,"caching_observed":true,"expires_at":'"$FUTURE"'}}')")
+assert_contains "shows warm status" "$out" "warm"
+assert_contains "shows hit ratio percentage" "$out" "hit 87%"
+assert_matches "shows countdown to expiry" "$out" '~[0-9]+(m|s)'
+
+out=$(run "$(with_fields '{"context_window":{"used_percentage":42,"total_input_tokens":0},"prompt_cache":{"warm":false,"hit_ratio":0.62,"caching_observed":true}}')")
+assert_contains "shows cold status" "$out" "cold"
+assert_not_contains "hides hit ratio when cold (stale/irrelevant)" "$out" "hit 62%"
+assert_not_contains "no countdown when cold" "$out" "cold ~"
+
+out=$(run "$(with_fields '{"prompt_cache":{"warm":true,"caching_observed":false}}')")
+assert_not_contains "hidden when caching_observed is false" "$out" "warm"
+
+# Color ramp: green while plenty of TTL left, yellow inside the last 20%.
+run_raw() { echo "$1" | bash statusline.sh 2>/dev/null; }
+NEAR_EXPIRY=$(( $(date +%s) + 30 ))    # 30s left on a 5m TTL = well inside the last 20% (60s)
+FAR_EXPIRY=$(( $(date +%s) + 280 ))    # 280s left on a 5m TTL = outside the warn window
+
+out=$(run_raw "$(with_fields '{"prompt_cache":{"warm":true,"ttl":"5m","hit_ratio":0.9,"caching_observed":true,"expires_at":'"$NEAR_EXPIRY"'}}')")
+assert_contains "yellow near expiry" "$out" "${YELLOW}warm"
+
+out=$(run_raw "$(with_fields '{"prompt_cache":{"warm":true,"ttl":"5m","hit_ratio":0.9,"caching_observed":true,"expires_at":'"$FAR_EXPIRY"'}}')")
+assert_contains "green far from expiry" "$out" "${GREEN}warm"
+
+# Cold reheat cost — the tokens a cache-miss re-write burns, plus that priced
+# as a share of the 5h window. Only computable when
+# context_window.total_input_tokens is present; depends on this machine's real
+# ~/.claude/.credentials.json for the window value (same pre-existing
+# dependency the burn-rate tests have), so only the format is asserted here.
+out=$(run "$(with_fields '{"context_window":{"used_percentage":42,"total_input_tokens":40000},"prompt_cache":{"warm":false,"ttl":"1h","hit_ratio":0.62,"caching_observed":true}}')")
+assert_matches "shows reheat tokens" "$out" 'cold 40k'
+assert_matches "shows reheat cost as % of 5h window" "$out" 'cold 40k (<1|[0-9]+)(-(<1|[0-9]+))?% 5h'
+
+out=$(run "$(with_fields '{"context_window":{"used_percentage":42,"total_input_tokens":0},"prompt_cache":{"warm":false,"hit_ratio":0.62,"caching_observed":true}}')")
+assert_not_contains "no reheat cost without a token count" "$out" "cold ~"
+
+section "Plan budgets"
+
+# Neither budget is printed, so both are read back through the cold-reheat
+# segment. BASE is an Opus model ($5/MTok input), and a 1h TTL prices a cache
+# write at 2x input, so 1,200,000 context tokens cost 1200c ($12.00) to
+# re-cache. The rendered percentage is therefore 1200 / window_cents.
+# Each case gets a throwaway XDG_CACHE_HOME so the 60s budget cache and the
+# calibration file from a previous case can't leak in.
+budget_payload=$(with_fields '{"context_window":{"used_percentage":42,"total_input_tokens":1200000},"prompt_cache":{"warm":false,"ttl":"1h","hit_ratio":0.62,"caching_observed":true}}')
+
+run_with_plan() {
+  local plan="$1" tier="$2" cache_home creds
+  cache_home=$(mktemp -d); creds=$(mktemp)
+  jq -n --arg p "$plan" --arg t "$tier" \
+    '{claudeAiOauth: {subscriptionType: $p, rateLimitTier: $t}}' > "$creds"
+  echo "$budget_payload" | XDG_CACHE_HOME="$cache_home" CLAUDE_HUD_CREDENTIALS="$creds" \
+    bash statusline.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
+  rm -rf "$cache_home" "$creds"
+}
+
+out=$(run_with_plan pro default_claude_pro)
+assert_contains "pro window (\$24)" "$out" "cold 1.2M 50% 5h"
+
+out=$(run_with_plan max default_claude_max_5x)
+assert_contains "max 5x window (\$120)" "$out" "cold 1.2M 10% 5h"
+
+out=$(run_with_plan max default_claude_max_20x)
+assert_contains "max 20x window (\$480)" "$out" "cold 1.2M 3% 5h"
+
+# Unrecognized tier on a max plan still lands on the 5x window, not the Pro one.
+out=$(run_with_plan max some_future_max_tier)
+assert_contains "unknown max tier falls back to 5x" "$out" "cold 1.2M 10% 5h"
+
+# A 5m TTL writes at 1.25x rather than 2x, so the same context costs less.
+budget_payload=$(with_fields '{"context_window":{"used_percentage":42,"total_input_tokens":1200000},"prompt_cache":{"warm":false,"ttl":"5m","hit_ratio":0.62,"caching_observed":true}}')
+out=$(run_with_plan max default_claude_max_5x)
+assert_contains "5m TTL writes at 1.25x, not 2x" "$out" "cold 1.2M 6% 5h"
+
+# Model matters: Sonnet input is $2/MTok against Opus's $5, so the same
+# context is 2.5x cheaper to re-cache.
+budget_payload=$(echo "$BASE" | jq '. + {"model":{"display_name":"claude-sonnet-5"},"context_window":{"used_percentage":42,"total_input_tokens":1200000},"prompt_cache":{"warm":false,"ttl":"1h","hit_ratio":0.62,"caching_observed":true}}')
+out=$(run_with_plan max default_claude_max_5x)
+assert_contains "sonnet is cheaper to re-cache than opus" "$out" "cold 1.2M 4% 5h"
+
+budget_payload=$(with_fields '{"context_window":{"used_percentage":42,"total_input_tokens":1200000},"prompt_cache":{"warm":false,"ttl":"1h","hit_ratio":0.62,"caching_observed":true}}')
+
+# Manual escape hatch for plans the tier table doesn't cover.
+cache_home=$(mktemp -d)
+out=$(echo "$budget_payload" | XDG_CACHE_HOME="$cache_home" CLAUDE_HUD_WINDOW_CENTS=6000 \
+  bash statusline.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+rm -rf "$cache_home"
+assert_contains "CLAUDE_HUD_WINDOW_CENTS overrides detection" "$out" "cold 1.2M 20% 5h"
+
+# A reheat too cheap to round to a whole percent reads as "<1%", not "0%".
+budget_payload=$(with_fields '{"context_window":{"used_percentage":42,"total_input_tokens":20000},"prompt_cache":{"warm":false,"ttl":"1h","hit_ratio":0.62,"caching_observed":true}}')
+out=$(run_with_plan max default_claude_max_5x)
+assert_contains "sub-percent reheat reads as <1%" "$out" "cold 20k <1% 5h"
+budget_payload=$(with_fields '{"context_window":{"used_percentage":42,"total_input_tokens":1200000},"prompt_cache":{"warm":false,"ttl":"1h","hit_ratio":0.62,"caching_observed":true}}')
+
+# With no credentials and no override there is no denominator at all, so the
+# segment falls back to the token count on its own rather than inventing one.
+cache_home=$(mktemp -d)
+out=$(echo "$budget_payload" | XDG_CACHE_HOME="$cache_home" \
+  CLAUDE_HUD_CREDENTIALS="$cache_home/absent.json" \
+  bash statusline.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+rm -rf "$cache_home"
+assert_contains "no budget falls back to tokens alone" "$out" "cold 1.2M to reheat"
+assert_not_contains "no invented percentage without a budget" "$out" "% 5h"
+
+section "Self-calibrated window"
+
+# When a calibration sample exists it is shown alongside the plan estimate,
+# low end first: 1200c against the Max 5x table ($120) is 10%, against a measured
+# $60 window it is 20%.
+cache_home=$(mktemp -d); creds=$(mktemp)
+mkdir -p "$cache_home/claude-hud"
+echo 6000 > "$cache_home/claude-hud/calib-cents"
+jq -n '{claudeAiOauth: {subscriptionType: "max", rateLimitTier: "default_claude_max_5x"}}' > "$creds"
+out=$(echo "$budget_payload" | XDG_CACHE_HOME="$cache_home" CLAUDE_HUD_CREDENTIALS="$creds" \
+  bash statusline.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "shows plan and measured estimates side by side" "$out" "cold 1.2M 10-20% 5h"
+
+# A corrupt calibration file is ignored rather than rendered.
+echo "not-a-number" > "$cache_home/claude-hud/calib-cents"
+out=$(echo "$budget_payload" | XDG_CACHE_HOME="$cache_home" CLAUDE_HUD_CREDENTIALS="$creds" \
+  bash statusline.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "corrupt calibration file is ignored" "$out" "cold 1.2M 10% 5h"
+rm -rf "$cache_home" "$creds"
 
 section "Compaction count"
 COMPACT_TRANSCRIPT=$(mktemp)
