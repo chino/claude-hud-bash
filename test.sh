@@ -97,6 +97,11 @@ export CLAUDE_HUD_CALIB_MIN_PCT=101
 # Snapshots go to a scratch dir so the suite never writes to the real cache.
 SNAPSHOT_DIR=$(mktemp -d)
 export CLAUDE_HUD_SNAPSHOT_DIR="$SNAPSHOT_DIR"
+# Cost and duration are opt-in (off by default) -- turn them on for the suite
+# as a whole, since most existing tests below assume they're on the line.
+# Their actual default-off/opt-in behavior gets its own dedicated section.
+export CLAUDE_HUD_SHOW_COST=1
+export CLAUDE_HUD_SHOW_DURATION=1
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -420,6 +425,20 @@ assert_contains "handles null model" "$out" '?'
 
 out=$(run "$(with_fields '{"rate_limits":null}')")
 assert_not_contains "no crash on null rate_limits" "$out" "error"
+
+section "Cost / duration opt-in"
+# Both are off by default -- run without the suite-wide export above.
+out=$(CLAUDE_HUD_SHOW_COST=0 CLAUDE_HUD_SHOW_DURATION=0 bash -c 'echo "$1" | bash statusline.sh' _ "$BASE" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+assert_not_contains "cost hidden by default" "$out" '$'
+assert_not_contains "duration hidden by default" "$out" "⏱️"
+
+out=$(CLAUDE_HUD_SHOW_COST=1 CLAUDE_HUD_SHOW_DURATION=0 bash -c 'echo "$1" | bash statusline.sh' _ "$BASE" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+assert_contains "cost shown when opted in" "$out" '$1.23'
+assert_not_contains "duration still hidden" "$out" "⏱️"
+
+out=$(CLAUDE_HUD_SHOW_COST=0 CLAUDE_HUD_SHOW_DURATION=1 bash -c 'echo "$1" | bash statusline.sh' _ "$BASE" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+assert_not_contains "cost still hidden" "$out" '$'
+assert_contains "duration shown when opted in" "$out" "⏱️"
 
 section "Environment badges"
 out=$(run "$(with_fields '{"transcript_path":""}')")
