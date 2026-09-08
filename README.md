@@ -2,10 +2,10 @@
 
 A simple low-dependency bash implementation inspired by [claude-hud](https://github.com/jarrodwatts/claude-hud) for Claude Code.
 
-<img width="1049" height="24" alt="image" src="https://github.com/user-attachments/assets/d16c5fde-6cb0-49b9-b221-ebece3f358e5" />
-
 
 ## What it shows
+
+<img width="1049" height="24" alt="image" src="https://github.com/user-attachments/assets/d16c5fde-6cb0-49b9-b221-ebece3f358e5" />
 
 ```
 [Opus 4.6] │ my-project git:(main*↑2↓1) │ ctx ████░░░░░░ 23% ↻ 1 │ warm ~54m hit 87% │ 5h ██░░░░░░░░ 22% 7pm │ 7d ████░░░░░░ 41% sat │ 🔥 12k/m ~1h20m │ 🔌2 🪝3 │ $0.04 │ ⏱️ 5m
@@ -136,6 +136,33 @@ The status line wraps across as many lines as needed to fit `COLUMNS` (passed in
 ### When it redraws
 
 Claude Code only re-runs the script on specific triggers: a new assistant message, `/compact` finishing, a permission-mode change, a vim-mode toggle, a warm prompt cache reaching its `expires_at` (so the cache segment above flips to cold right on schedule, even mid-tool-call), the 5-hour rate-limit window hitting its own `resets_at`, or the `refreshInterval` timer if you've set one. **Terminal resize is not one of them** — if you resize the window or a pane, the status line keeps rendering at the old width until the next trigger fires. This is a known upstream gap, not a bug in this script: [anthropics/claude-code#76988](https://github.com/anthropics/claude-code/issues/76988). Setting `refreshInterval` (see [Install](#install)) bounds how long a resize stays stale, at the cost of a script run every N seconds.
+
+## Caching
+
+Regenerable state lives in `~/.cache/claude-hud/` (or `$XDG_CACHE_HOME/claude-hud/`)
+and is safe to delete at any point:
+
+| File | Holds |
+| --- | --- |
+| `token-budget` | Plan detection, re-read at most once a minute |
+| `calib-cents` / `calib-stamp` | Self-calibrated window size, refreshed at most once per `CLAUDE_HUD_CALIB_INTERVAL` |
+| `status/<session-id>.txt` | A plain-text copy of the current status line (colors stripped) — lets anything without a terminal (`cat`) read your current usage. Pruned after 7 days. Set `CLAUDE_HUD_SNAPSHOT_DIR=none` to disable |
+
+### Reading the status line from outside the terminal
+
+Every render also writes the line to a plain-text file, so anything that can't
+see your terminal can read your current usage with `cat` — a monitor loop, an
+agent checking its own budget before starting expensive work, a second pane:
+
+```bash
+cat ~/.cache/claude-hud/status/<session-id>.txt
+```
+
+Each session writes its own file, named for its session id. There is
+deliberately no "latest" alias: with several sessions running it would just
+race between them and a reader could not tell whose numbers it got. The file's
+mtime is its freshness: nothing rewrites it once a session ends, so
+check it before trusting a number.
 
 ## Customization
 

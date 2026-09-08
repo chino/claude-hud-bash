@@ -35,7 +35,9 @@ cache_hit_pct=$(echo "$data" | jq -r '((.prompt_cache.hit_ratio // 0) * 100) | r
 context_input_tokens=$(echo "$data" | jq -r '.context_window.total_input_tokens // 0')
 cwd=$(echo "$data" | jq -r '.cwd // ""')
 project=$(basename "$cwd")
+claude_mds=$(find "$cwd" -name "CLAUDE.md" 2>/dev/null | wc -l | tr -d ' ')
 transcript=$(echo "$data" | jq -r '.transcript_path // ""')
+session_id=$(echo "$data" | jq -r '.session_id // ""')
 
 to_epoch() {
   local v=$1
@@ -46,6 +48,11 @@ to_epoch() {
 resets_at=$(to_epoch "$resets_at")
 resets_7d=$(to_epoch "$resets_7d")
 cache_expires_at=$(to_epoch "$cache_expires_raw")
+
+# XDG_CACHE_HOME is the freedesktop.org convention for "where programs keep
+# regenerable data" — ~/.cache unless the user has moved it. Everything this
+# script caches lives under one directory there and can be deleted at any time.
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-hud"
 
 compactions=0
 [[ -n $transcript && -f $transcript ]] && compactions=$(grep -c '"subtype":"compact_boundary"' "$transcript" 2>/dev/null || echo 0)
@@ -64,7 +71,6 @@ compactions=0
 # a token budget.
 #
 # Cached for 60s — credentials rarely change and jq parsing adds latency.
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-hud"
 budget_cache="$CACHE_DIR/token-budget"
 token_budget=${CLAUDE_HUD_TOKEN_BUDGET:-0}
 window_cents=${CLAUDE_HUD_WINDOW_CENTS:-0}
@@ -240,7 +246,6 @@ ahead_behind=""
 (( behind > 0 )) && ahead_behind+="↓${behind}"
 
 # ── Environment counts ────────────────────────────────────────────────────────
-claude_mds=$(find "$cwd" -name "CLAUDE.md" 2>/dev/null | wc -l | tr -d ' ')
 mcps=$(jq -r '(.mcpServers // {}) | length' ~/.claude/settings.json 2>/dev/null || echo 0)
 hooks=$(jq -r '[.hooks // {} | to_entries[].value[]] | length' ~/.claude/settings.json 2>/dev/null || echo 0)
 
@@ -363,6 +368,7 @@ if (( resets_7d > now )); then
   fi
 fi
 
+
 # ── Bars ──────────────────────────────────────────────────────────────────────
 make_bar() {
   local pct=$1 color=$2 width=${3:-10}
@@ -419,9 +425,9 @@ segments+=("${DIM}5h${RESET} ${usage_bar} ${USAGE_COLOR}${usage_5h}%${reset_labe
 [[ -n $burn_label ]] && segments+=("${burn_label}${ttc_label}")
 
 env=""
-(( claude_mds > 0 )) && env+=" 📋${claude_mds}"
 (( mcps > 0 ))       && env+=" 🔌${mcps}"
 (( hooks > 0 ))      && env+=" 🪝${hooks}"
+(( claude_mds > 0 )) && env+=" 📋${claude_mds}"
 [[ -n $env ]] && segments+=("${env# }")
 
 segments+=("${YELLOW}${cost}${RESET}")
@@ -441,5 +447,32 @@ for (( i = 1; i < ${#segments[@]}; i++ )); do
 done
 
 printf '%s\n' "${lines[@]}"
+
+# ── Snapshot ──────────────────────────────────────────────────────────────────
+# Also write the rendered HUD to a file, so anything that can't see the
+# terminal — a monitor loop, an agent, another pane — can read the current
+# status with a plain `cat` instead of re-deriving any of it. Colors are
+# stripped; the file's mtime is its freshness.
+#
+# One file per session, deliberately with no "latest" alias: with several
+# sessions running, a shared pointer just races between them and whoever reads
+# it gets an arbitrary session's numbers. Readers name the session they mean.
+# Set CLAUDE_HUD_SNAPSHOT_DIR=none to turn this off.
+snapshot_dir=${CLAUDE_HUD_SNAPSHOT_DIR:-$CACHE_DIR/status}
+if [[ $snapshot_dir != none ]] && mkdir -p "$snapshot_dir" 2>/dev/null; then
+  snapshot_name=$(printf '%s' "${session_id:-unknown}" | tr -cd 'A-Za-z0-9._-')
+  snapshot_file="$snapshot_dir/${snapshot_name:-unknown}.txt"
+  printf '%s\n' "${lines[@]}" | sed -E 's/\x1b\[[0-9;]*m//g' > "$snapshot_file" 2>/dev/null
+
+  # Sessions come and go; prune abandoned snapshots at most once a day so this
+  # doesn't accumulate one file per session forever. Cheap — one flat dir.
+  prune_stamp="$snapshot_dir/.pruned"
+  prune_age=86400
+  [[ -f $prune_stamp ]] && prune_age=$(( now - $(date -r "$prune_stamp" +%s 2>/dev/null || echo 0) ))
+  if (( prune_age >= 86400 )); then
+    : > "$prune_stamp"
+    find "$snapshot_dir" -maxdepth 1 -name '*.txt' -mtime +7 -delete 2>/dev/null
+  fi
+fi
 
 exit 0
