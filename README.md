@@ -112,7 +112,7 @@ divided by a guessed weekly cap.
      "statusLine": {
        "type": "command",
        "command": "~/.claude/statusline.sh",
-       "refreshInterval": 5
+       "refreshInterval": 15
      }
    }
    ```
