@@ -94,6 +94,10 @@ with_fields() {
 # that need a calibration value seed the cache file directly instead.
 export CLAUDE_HUD_CALIB_MIN_PCT=101
 
+# Snapshots go to a scratch dir so the suite never writes to the real cache.
+SNAPSHOT_DIR=$(mktemp -d)
+export CLAUDE_HUD_SNAPSHOT_DIR="$SNAPSHOT_DIR"
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 section "Model"
@@ -417,6 +421,27 @@ section "Environment badges"
 out=$(run "$(with_fields '{"transcript_path":""}')")
 assert_contains "renders without crashing" "$out" "%"
 
+section "Snapshot file"
+SNAP_SESSION="test-session-$$"
+run "$(echo "$BASE" | jq '.session_id = "'"$SNAP_SESSION"'"')" >/dev/null
+snap="$SNAPSHOT_DIR/${SNAP_SESSION}.txt"
+assert_contains "writes a per-session snapshot" "$([ -f "$snap" ] && echo yes || echo no)" "yes"
+assert_contains "snapshot holds the rendered line" "$(cat "$snap" 2>/dev/null)" "claude-opus-4-6"
+assert_not_contains "snapshot is stripped of ANSI codes" "$(cat "$snap" 2>/dev/null)" $'\e['
+
+# Two sessions must not overwrite each other.
+run "$(echo "$BASE" | jq '.session_id = "other-session"')" >/dev/null
+assert_contains "a second session gets its own file" \
+  "$([ -f "$SNAPSHOT_DIR/other-session.txt" ] && echo yes || echo no)" "yes"
+assert_contains "the first session's file survives" \
+  "$([ -f "$snap" ] && echo yes || echo no)" "yes"
+
+# Opt-out writes nothing.
+before=$(ls -1 "$SNAPSHOT_DIR" | wc -l | tr -d ' ')
+CLAUDE_HUD_SNAPSHOT_DIR=none run "$(echo "$BASE" | jq '.session_id = "opt-out"')" >/dev/null
+assert_contains "CLAUDE_HUD_SNAPSHOT_DIR=none writes nothing" \
+  "$(ls -1 "$SNAPSHOT_DIR" | wc -l | tr -d ' ')" "$before"
+
 section "Terminal width (COLUMNS)"
 # No COLUMNS set → no wrapping, everything on one line.
 out=$(run "$BASE")
@@ -442,7 +467,7 @@ assert_contains "narrow COLUMNS: keeps cost" "$out" "1.23"
 too_long=$(echo "$out" | awk -v max=53 'length($0) > max { print }')
 assert_contains "narrow COLUMNS: no line grossly exceeds width" "${too_long:-<none>}" "<none>"
 
-rm -rf "$FIXTURE_DIR"
+rm -rf "$FIXTURE_DIR" "$SNAPSHOT_DIR"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
