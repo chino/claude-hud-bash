@@ -35,7 +35,6 @@ cache_hit_pct=$(echo "$data" | jq -r '((.prompt_cache.hit_ratio // 0) * 100) | r
 context_input_tokens=$(echo "$data" | jq -r '.context_window.total_input_tokens // 0')
 cwd=$(echo "$data" | jq -r '.cwd // ""')
 project=$(basename "$cwd")
-claude_mds=$(find "$cwd" -name "CLAUDE.md" 2>/dev/null | wc -l | tr -d ' ')
 transcript=$(echo "$data" | jq -r '.transcript_path // ""')
 session_id=$(echo "$data" | jq -r '.session_id // ""')
 
@@ -434,7 +433,7 @@ cols=${COLUMNS:-0}
 visible_width() {
   local stripped wide vs16
   stripped=$(sed -E 's/\x1b\[[0-9;]*m//g' <<< "$1")
-  wide=$(grep -oE '🔥|📋|🔌|🪝|⏱' <<< "$stripped" | wc -l)
+  wide=$(grep -oE '🔥|🔌|🪝|⏱' <<< "$stripped" | wc -l)
   vs16=$(grep -oE $'\xef\xb8\x8f' <<< "$stripped" | wc -l)
   echo $(( ${#stripped} + wide - vs16 ))
 }
@@ -463,7 +462,6 @@ segments+=("${DIM}5h${RESET} ${usage_bar} ${USAGE_COLOR}${usage_5h}%${reset_labe
 env=""
 (( mcps > 0 ))       && env+=" 🔌${mcps}"
 (( hooks > 0 ))      && env+=" 🪝${hooks}"
-(( claude_mds > 0 )) && env+=" 📋${claude_mds}"
 [[ -n $env ]] && segments+=("${env# }")
 
 segments+=("${YELLOW}${cost}${RESET}")

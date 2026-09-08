@@ -14,7 +14,7 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 | **5h usage** | `5h ██░░░░░░░░ 22% 7pm` | Rolling 5-hour rate limit consumption + estimated reset time. Turns magenta at 75%, red at 90% |
 | **7d usage** | `7d ████░░░░░░ 41% sat` | Rolling 7-day rate limit consumption + reset. Hidden until it is worth the space — see [Weekly window](#weekly-window). Cyan by default, yellow at 75%, red at 90% |
 | **Burn rate** | `🔥 12k/m ~1h20m` | Tokens/min consumed in this window, plus estimated time until you hit the cap at the current rate |
-| **Env** | `📋1 🔌2 🪝3` | Count of CLAUDE.md files (📋), MCP servers (🔌), and hooks (🪝). Only shown when non-zero |
+| **Env** | `🔌2 🪝3` | Count of MCP servers (🔌) and hooks (🪝). Only shown when non-zero |
 | **Cost** | `$0.04` | Total API cost for the current session |
 | **Duration** | `⏱️ 5m` | How long the current Claude Code session has been running |
 | **Host stats** | `ram 24% cpu 6% t 7pm` | Free RAM (percentage used) and 1-minute CPU load (percentage of this host's own core count), plus the current wall-clock time. Linux-only (needs `free`) — the whole segment is omitted on hosts without it, e.g. macOS |
