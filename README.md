@@ -18,6 +18,9 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 | **Cost** | `$0.04` | Total API cost for the current session |
 | **Duration** | `⏱️ 5m` | How long the current Claude Code session has been running |
 | **Host stats** | `ram 24% cpu 6% t 7pm` | Free RAM (percentage used) and 1-minute CPU load (percentage of this host's own core count), plus the current wall-clock time. Linux-only (needs `free`) — the whole segment is omitted on hosts without it, e.g. macOS |
+| **Cost** | `$0.04` | Total API cost for the current session. Off by default; set `CLAUDE_HUD_SHOW_COST=1` |
+| **Duration** | `⏱️ 5m` | How long the current session has been running. Off by default; set `CLAUDE_HUD_SHOW_DURATION=1` |
+| **Host stats** | `ram 24% cpu 6% t 7pm` | Free RAM (percentage used) and 1-minute CPU load (percentage of this host's own core count via `nproc`), plus the current wall-clock time. Linux-only (needs `free`) — the whole segment is omitted on hosts without it, e.g. macOS |
 
 ### Reset time
 
@@ -89,6 +92,7 @@ The weekly window only exposes `used_percentage`, and weekly limits are subject
 to promotions that shift the denominator without notice. The reported
 percentage already accounts for them, so it is shown as-is and nothing is
 divided by a guessed weekly cap.
+
 
 ## Requirements
 

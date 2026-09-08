@@ -464,8 +464,13 @@ env=""
 (( hooks > 0 ))      && env+=" 🪝${hooks}"
 [[ -n $env ]] && segments+=("${env# }")
 
-segments+=("${YELLOW}${cost}${RESET}")
-segments+=("⏱️  ${DIM}${duration}${RESET}")
+# Cost and duration are opt-in, off by default -- burn rate/time-to-cap
+# already cover "how much budget is left in this window", which is the
+# number most people actually want at a glance; total-session cost and
+# wall-clock session length are a different, less universally-wanted
+# question, so they don't cost every user the extra width by default.
+[[ ${CLAUDE_HUD_SHOW_COST:-0} == 1 ]]     && segments+=("${YELLOW}${cost}${RESET}")
+[[ ${CLAUDE_HUD_SHOW_DURATION:-0} == 1 ]] && segments+=("⏱️  ${DIM}${duration}${RESET}")
 [[ -n $host_stats_label ]] && segments+=("$host_stats_label")
 
 # Pack segments onto as many lines as needed to fit COLUMNS — wraps instead of
