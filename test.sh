@@ -403,18 +403,20 @@ assert_contains "corrupt calibration file is ignored" "$out" "cold 1.2M 10% 5h"
 rm -rf "$cache_home" "$creds"
 
 section "Compaction count"
+# The ↻ badge was removed: counting compactions meant grepping the session
+# transcript on every render, and transcripts grow unbounded (750 MB was real).
 COMPACT_TRANSCRIPT=$(mktemp)
-cat > "$COMPACT_TRANSCRIPT" <<'EOF'
-{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}
-{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}
-EOF
-COMPACT_BASE=$(with_fields "$(printf '{"transcript_path":"%s"}' "$COMPACT_TRANSCRIPT")")
-out=$(run "$COMPACT_BASE")
-assert_contains "shows compaction count next to ctx" "$out" "↻ 2"
-rm -f "$COMPACT_TRANSCRIPT"
+printf '%s\n%s\n' \
+  '{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}' \
+  '{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}' \
+  > "$COMPACT_TRANSCRIPT"
+out=$(run "$(with_fields "$(printf '{"transcript_path":"%s"}' "$COMPACT_TRANSCRIPT")")")
+assert_not_contains "compaction badge is gone" "$out" "↻"
 
-out=$(run "$BASE")
-assert_not_contains "hidden when no compactions" "$out" "↻"
+# The point of removing it: no render may read the transcript at all.
+assert_not_contains "transcript is never read" \
+  "$(grep -v '^[[:space:]]*#' statusline.sh)" 'transcript'
+rm -f "$COMPACT_TRANSCRIPT"
 
 section "Missing / null fields"
 out=$(run '{}')
