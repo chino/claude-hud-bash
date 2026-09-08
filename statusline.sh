@@ -35,7 +35,6 @@ cache_hit_pct=$(echo "$data" | jq -r '((.prompt_cache.hit_ratio // 0) * 100) | r
 context_input_tokens=$(echo "$data" | jq -r '.context_window.total_input_tokens // 0')
 cwd=$(echo "$data" | jq -r '.cwd // ""')
 project=$(basename "$cwd")
-transcript=$(echo "$data" | jq -r '.transcript_path // ""')
 session_id=$(echo "$data" | jq -r '.session_id // ""')
 
 to_epoch() {
@@ -53,8 +52,6 @@ cache_expires_at=$(to_epoch "$cache_expires_raw")
 # script caches lives under one directory there and can be deleted at any time.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-hud"
 
-compactions=0
-[[ -n $transcript && -f $transcript ]] && compactions=$(grep -c '"subtype":"compact_boundary"' "$transcript" 2>/dev/null || echo 0)
 
 # ── Plan budgets ──────────────────────────────────────────────────────────────
 # Two budgets are derived from the plan, in different units:
@@ -450,9 +447,7 @@ else
   segments+=("${YELLOW}${project}${RESET}")
 fi
 
-compact_label=""
-(( compactions > 0 )) && compact_label=" ${DIM}↻ ${compactions}${RESET}"
-segments+=("${DIM}ctx${RESET} ${ctx_bar} ${CTX_COLOR}${ctx}%${RESET}${compact_label}")
+segments+=("${DIM}ctx${RESET} ${ctx_bar} ${CTX_COLOR}${ctx}%${RESET}")
 [[ -n $cache_label ]] && segments+=("$cache_label")
 segments+=("${DIM}5h${RESET} ${usage_bar} ${USAGE_COLOR}${usage_5h}%${reset_label}${RESET}")
 (( usage_7d >= 100 - WEEKLY_SHOW_AT_REMAINING )) && \

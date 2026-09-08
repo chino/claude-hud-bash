@@ -4,12 +4,11 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 
 
 ## What it shows
-
 | Element | Example | Description |
 |---------|---------|-------------|
 | **Model** | `[Opus 4.6]` | The Claude model currently in use |
 | **Project** | `my-project git:(main*↑2↓1)` | Current directory name and git branch. `*` means uncommitted changes; `↑N`/`↓N` show commits ahead/behind the upstream (only when tracking a remote and diverged). On detached HEAD, falls back to an exact tag match, then a short commit SHA, instead of showing nothing |
-| **Context** | `ctx ████░░░░░░ 23% ↻ 1` | Context window usage. Turns yellow at 70%, red at 85%. The dim `↻ N` (shown only when non-zero) counts compactions in the transcript, so a sudden drop in usage isn't confusing |
+| **Context** | `ctx ████░░░░░░ 23%` | Context window usage. Turns yellow at 70%, red at 85% |
 | **Prompt cache** | `warm ~54m hit 87%` / `cold 829.5k 2-3% 5h` | Whether the main conversation's prompt cache is warm or cold, from `prompt_cache.warm`. Green while warm, shifting to yellow inside the last 20% of the TTL, red once cold. **Warm**: a countdown to `expires_at`, plus `hit N%` — the cache hit ratio. **Cold**: the tokens the next turn re-writes into the cache, then what that costs as a share of your 5-hour window under two independent estimates (see [Cold reheat cost](#cold-reheat-cost) and [docs/cold-reheat.md](docs/cold-reheat.md)); the hit ratio is dropped here since it's a backward-looking stat, not something that changes what the next turn costs. Hidden until the first API response of the session, since `prompt_cache` isn't in the payload before then |
 | **5h usage** | `5h ██░░░░░░░░ 22% 7pm` | Rolling 5-hour rate limit consumption + estimated reset time. Turns magenta at 75%, red at 90% |
 | **7d usage** | `7d ████░░░░░░ 41% sat` | Rolling 7-day rate limit consumption + reset. Hidden until it is worth the space — see [Weekly window](#weekly-window). Cyan by default, yellow at 75%, red at 90% |
