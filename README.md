@@ -5,12 +5,6 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 
 ## What it shows
 
-<img width="1049" height="24" alt="image" src="https://github.com/user-attachments/assets/d16c5fde-6cb0-49b9-b221-ebece3f358e5" />
-
-```
-[Opus 4.6] │ my-project git:(main*↑2↓1) │ ctx ████░░░░░░ 23% ↻ 1 │ warm ~54m hit 87% │ 5h ██░░░░░░░░ 22% 7pm │ 7d ████░░░░░░ 41% sat │ 🔥 12k/m ~1h20m │ 🔌2 🪝3 │ $0.04 │ ⏱️ 5m
-```
-
 | Element | Example | Description |
 |---------|---------|-------------|
 | **Model** | `[Opus 4.6]` | The Claude model currently in use |
@@ -23,6 +17,7 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 | **Env** | `📋1 🔌2 🪝3` | Count of CLAUDE.md files (📋), MCP servers (🔌), and hooks (🪝). Only shown when non-zero |
 | **Cost** | `$0.04` | Total API cost for the current session |
 | **Duration** | `⏱️ 5m` | How long the current Claude Code session has been running |
+| **Host stats** | `ram 24% cpu 6% t 7pm` | Free RAM (percentage used) and 1-minute CPU load (percentage of this host's own core count), plus the current wall-clock time. Linux-only (needs `free`) — the whole segment is omitted on hosts without it, e.g. macOS |
 
 ### Reset time
 
