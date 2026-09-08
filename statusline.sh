@@ -19,23 +19,54 @@ BRIGHT_CYAN=$'\e[96m'
 WEEKLY_SHOW_AT_REMAINING=${WEEKLY_SHOW_AT_REMAINING:-80}
 WEEKLY_BAR_WIDTH=${WEEKLY_BAR_WIDTH:-10}
 
-model=$(echo "$data" | jq -r '.model.display_name // "?"')
-ctx=$(echo "$data" | jq -r '.context_window.used_percentage // 0 | floor')
-cost=$(echo "$data" | jq -r '.cost.total_cost_usd // 0 | "$\(. * 100 | round | . / 100)"')
-usage_5h=$(echo "$data" | jq -r '.rate_limits.five_hour.used_percentage // 0 | floor')
-resets_at=$(echo "$data" | jq -r '.rate_limits.five_hour.resets_at // 0')
-usage_7d=$(echo "$data" | jq -r '.rate_limits.seven_day.used_percentage // 0 | floor')
-resets_7d=$(echo "$data" | jq -r '.rate_limits.seven_day.resets_at // 0')
-duration_ms=$(echo "$data" | jq -r '.cost.total_duration_ms // 0')
-cache_warm=$(echo "$data" | jq -r '.prompt_cache.warm // empty')
-cache_ttl=$(echo "$data" | jq -r '.prompt_cache.ttl // ""')
-cache_observed=$(echo "$data" | jq -r '.prompt_cache.caching_observed // false')
-cache_expires_raw=$(echo "$data" | jq -r '.prompt_cache.expires_at // 0')
-cache_hit_pct=$(echo "$data" | jq -r '((.prompt_cache.hit_ratio // 0) * 100) | round')
-context_input_tokens=$(echo "$data" | jq -r '.context_window.total_input_tokens // 0')
-cwd=$(echo "$data" | jq -r '.cwd // ""')
+# Every field comes out of ONE jq call. This used to be sixteen separate
+# `echo "$data" | jq` lines — sixteen forks, each re-parsing the same small
+# payload from scratch, and ~88% of that time was process startup rather than
+# any actual JSON work.
+#
+# Read with mapfile, one value per line — NOT `IFS=$'\t' read ... <<< @tsv`.
+# Tab is IFS whitespace, so bash collapses runs of it: a single empty value in
+# the middle silently shifts every field after it by one, with no error.
+#
+# `warm` is deliberately "true" or "" rather than the raw boolean, matching the
+# old `// empty` behaviour that the [[ $cache_warm == "true" ]] test expects.
+mapfile -t F < <(printf '%s' "$data" | jq -r '
+  (.model.display_name // "?"),
+  (.context_window.used_percentage // 0 | floor),
+  (.cost.total_cost_usd // 0 | "$\(. * 100 | round | . / 100)"),
+  (.rate_limits.five_hour.used_percentage // 0 | floor),
+  (.rate_limits.five_hour.resets_at // 0),
+  (.rate_limits.seven_day.used_percentage // 0 | floor),
+  (.rate_limits.seven_day.resets_at // 0),
+  (.cost.total_duration_ms // 0),
+  (if .prompt_cache.warm == true then "true" else "" end),
+  (.prompt_cache.ttl // ""),
+  (.prompt_cache.caching_observed // false),
+  (.prompt_cache.expires_at // 0),
+  ((.prompt_cache.hit_ratio // 0) * 100 | round),
+  (.context_window.total_input_tokens // 0),
+  (.cwd // ""),
+  (.session_id // "")' 2>/dev/null)
+
+# Defaults mirror the // fallbacks above, so malformed JSON degrades to the
+# same empty statusline it always did instead of printing raw bash.
+model=${F[0]:-?}
+ctx=${F[1]:-0}
+cost=${F[2]:-\$0}
+usage_5h=${F[3]:-0}
+resets_at=${F[4]:-0}
+usage_7d=${F[5]:-0}
+resets_7d=${F[6]:-0}
+duration_ms=${F[7]:-0}
+cache_warm=${F[8]-}
+cache_ttl=${F[9]-}
+cache_observed=${F[10]:-false}
+cache_expires_raw=${F[11]:-0}
+cache_hit_pct=${F[12]:-0}
+context_input_tokens=${F[13]:-0}
+cwd=${F[14]-}
+session_id=${F[15]-}
 project=$(basename "$cwd")
-session_id=$(echo "$data" | jq -r '.session_id // ""')
 
 to_epoch() {
   local v=$1
@@ -51,7 +82,6 @@ cache_expires_at=$(to_epoch "$cache_expires_raw")
 # regenerable data" — ~/.cache unless the user has moved it. Everything this
 # script caches lives under one directory there and can be deleted at any time.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-hud"
-
 
 # ── Plan budgets ──────────────────────────────────────────────────────────────
 # Two budgets are derived from the plan, in different units:
@@ -242,8 +272,11 @@ ahead_behind=""
 (( behind > 0 )) && ahead_behind+="↓${behind}"
 
 # ── Environment counts ────────────────────────────────────────────────────────
-mcps=$(jq -r '(.mcpServers // {}) | length' ~/.claude/settings.json 2>/dev/null || echo 0)
-hooks=$(jq -r '[.hooks // {} | to_entries[].value[]] | length' ~/.claude/settings.json 2>/dev/null || echo 0)
+# Both counts from a single read of settings.json, same reasoning as above.
+mapfile -t E < <(jq -r '((.mcpServers // {}) | length), ([.hooks // {} | to_entries[].value[]] | length)' \
+  ~/.claude/settings.json 2>/dev/null)
+mcps=${E[0]:-0}
+hooks=${E[1]:-0}
 
 # ── Bar colors ────────────────────────────────────────────────────────────────
 if   (( ctx >= 85 )); then CTX_COLOR=$RED

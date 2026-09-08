@@ -97,6 +97,7 @@ export CLAUDE_HUD_CALIB_MIN_PCT=101
 # Snapshots go to a scratch dir so the suite never writes to the real cache.
 SNAPSHOT_DIR=$(mktemp -d)
 export CLAUDE_HUD_SNAPSHOT_DIR="$SNAPSHOT_DIR"
+
 # Cost and duration are opt-in (off by default) -- turn them on for the suite
 # as a whole, since most existing tests below assume they're on the line.
 # Their actual default-off/opt-in behavior gets its own dedicated section.
@@ -405,6 +406,7 @@ rm -rf "$cache_home" "$creds"
 section "Compaction count"
 # The ↻ badge was removed: counting compactions meant grepping the session
 # transcript on every render, and transcripts grow unbounded (750 MB was real).
+# The number wasn't worth a scan that scales with session length.
 COMPACT_TRANSCRIPT=$(mktemp)
 printf '%s\n%s\n' \
   '{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}' \
