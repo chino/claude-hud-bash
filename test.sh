@@ -126,10 +126,14 @@ section "Reset time"
 out=$(run "$BASE")
 assert_matches "shows clock time next to 5h%" "$out" '[0-9]+(:[0-9]+)?(am|pm)'
 
-# Not shown when resets_at is missing/zero
+# Not shown when resets_at is missing/zero. Scoped to the 5h segment itself
+# (up to the duration icon) rather than the whole line -- the host-stats
+# segment further right always carries its own wall-clock time, which
+# legitimately contains "am"/"pm" regardless of resets_at.
 out=$(run "$(with_fields '{"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":0}}}')")
-assert_not_contains "no clock time without resets_at" "$out" "am"
-assert_not_contains "no clock time without resets_at" "$out" "pm"
+out_5h_area=${out%%⏱️*}
+assert_not_contains "no clock time without resets_at" "$out_5h_area" "am"
+assert_not_contains "no clock time without resets_at" "$out_5h_area" "pm"
 
 section "Weekly (7-day) usage"
 weekly() {

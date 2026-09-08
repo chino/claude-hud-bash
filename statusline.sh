@@ -368,6 +368,42 @@ if (( resets_7d > now )); then
   fi
 fi
 
+# ── Host stats (RAM / CPU / clock) ────────────────────────────────────────────
+# Best-effort: `free` is Linux-only, so this degrades gracefully (empty
+# segment) on a host that doesn't have it rather than erroring the whole
+# statusline. "avail" is `free`'s own "available" column (what could
+# actually be allocated before swapping), not the raw "free" column, which
+# undercounts anything sitting in reclaimable page cache.
+ram_label=""
+if command -v free >/dev/null 2>&1; then
+  # Percentage USED (total minus available), not free -- matches every
+  # other number in this statusline (ctx/5h/7d are all "how much of the
+  # budget is consumed", higher = closer to a limit), rather than
+  # introducing a lone "higher is better" metric that reads backwards
+  # next to the rest of the line.
+  ram_used_pct=$(free -m 2>/dev/null | awk '/^Mem:/{printf "%d", (($2-$7)/$2)*100}')
+  [[ -n $ram_used_pct ]] && ram_label=" ${DIM}ram${RESET} ${ram_used_pct}%"
+fi
+
+cpu_label=""
+cpu_load1=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
+[[ -z $cpu_load1 ]] && cpu_load1=$(uptime 2>/dev/null | grep -oE '[0-9]+\.[0-9]+,?' | head -1 | tr -d ',')
+# Shown as a percentage of this host's OWN core count -- a load-average
+# float means nothing on its own without knowing how many cores it's
+# being spread across, so normalize against the real number rather than
+# a fixed/arbitrary denominator.
+if [[ -n $cpu_load1 ]]; then
+  cpu_cores=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null)
+  if [[ -n $cpu_cores && $cpu_cores -gt 0 ]]; then
+    cpu_pct=$(awk -v l="$cpu_load1" -v c="$cpu_cores" 'BEGIN{printf "%d", (l/c)*100}')
+    cpu_label=" ${DIM}cpu${RESET} ${cpu_pct}%"
+  fi
+fi
+
+clock_label=" ${DIM}t${RESET} $(date '+%-I:%M%p' 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+
+host_stats_label="${ram_label}${cpu_label}${clock_label}"
+host_stats_label="${host_stats_label# }"
 
 # ── Bars ──────────────────────────────────────────────────────────────────────
 make_bar() {
@@ -432,6 +468,7 @@ env=""
 
 segments+=("${YELLOW}${cost}${RESET}")
 segments+=("⏱️  ${DIM}${duration}${RESET}")
+[[ -n $host_stats_label ]] && segments+=("$host_stats_label")
 
 # Pack segments onto as many lines as needed to fit COLUMNS — wraps instead of
 # dropping or truncating, so nothing is lost on a narrow terminal.
