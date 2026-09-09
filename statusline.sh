@@ -545,19 +545,24 @@ if [[ $snapshot_dir != none ]] && mkdir -p "$snapshot_dir" 2>/dev/null; then
   # Epochs are emitted raw, so no consumer has to guess today-vs-tomorrow the
   # way a bare clock time forces.
   json_escape() { local v=${1//\\/\\\\}; printf '%s' "${v//\"/\\\"}"; }
+  # A timestamp the payload didn't supply comes through as 0, and 0 is a real
+  # epoch -- a consumer doing `todate` on it gets 1970-01-01 and no hint that
+  # the value was simply absent. Emit JSON null instead, which every consumer
+  # already has to handle and which cannot be mistaken for a date.
+  epoch_or_null() { (( ${1:-0} > 0 )) && printf '%s' "$1" || printf 'null'; }
   cache_warm_json=false; [[ $cache_warm == "true" ]] && cache_warm_json=true
   printf '{"session_id":"%s","rendered_at":%s,"model":"%s","cwd":"%s","project":"%s",' \
     "$(json_escape "$session_id")" "$now" "$(json_escape "$model")" \
     "$(json_escape "$cwd")" "$(json_escape "$project")" \
     > "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
   printf '"ctx_pct":%s,"context_input_tokens":%s,"used_5h_pct":%s,"resets_5h":%s,' \
-    "${ctx:-0}" "${context_input_tokens:-0}" "${usage_5h:-0}" "${resets_at:-0}" \
+    "${ctx:-0}" "${context_input_tokens:-0}" "${usage_5h:-0}" "$(epoch_or_null "${resets_at:-0}")" \
     >> "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
   printf '"used_7d_pct":%s,"resets_7d":%s,"cache_observed":%s,"cache_warm":%s,' \
-    "${usage_7d:-0}" "${resets_7d:-0}" "${cache_observed:-false}" "$cache_warm_json" \
+    "${usage_7d:-0}" "$(epoch_or_null "${resets_7d:-0}")" "${cache_observed:-false}" "$cache_warm_json" \
     >> "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
   printf '"cache_expires_at":%s,"cache_hit_pct":%s,"cost_usd":%s,"duration_ms":%s}\n' \
-    "${cache_expires_at:-0}" "${cache_hit_pct:-0}" "${cost_usd:-0}" "${duration_ms:-0}" \
+    "$(epoch_or_null "${cache_expires_at:-0}")" "${cache_hit_pct:-0}" "${cost_usd:-0}" "${duration_ms:-0}" \
     >> "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
   # Rename into place so a reader never catches a half-written object.
   mv -f "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" \

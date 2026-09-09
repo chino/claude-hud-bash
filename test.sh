@@ -489,6 +489,23 @@ assert_contains "cost is a number, not a \$-string" "$(jq -r '.cost_usd|type' "$
 assert_contains "rendered_at is recent" \
   "$(jq -r --argjson now "$(date +%s)" 'if ($now - .rendered_at) < 60 then "fresh" else "stale" end' "$jsnap" 2>/dev/null)" "fresh"
 
+# An absent timestamp must be null, not 0 -- 0 is a real epoch and renders as
+# 1970-01-01, which a consumer cannot distinguish from a genuine date.
+absent="json-absent-$$"
+run "$(echo "$BASE" | jq '.session_id = "'"$absent"'" | del(.rate_limits) | del(.prompt_cache)')" >/dev/null
+abs_json="$SNAPSHOT_DIR/${absent}.json"
+assert_contains "still valid JSON with nulls" "$(jq -e . "$abs_json" >/dev/null 2>&1 && echo yes || echo no)" "yes"
+assert_contains "absent resets_5h is null" "$(jq -r '.resets_5h|type' "$abs_json" 2>/dev/null)" "null"
+assert_contains "absent resets_7d is null" "$(jq -r '.resets_7d|type' "$abs_json" 2>/dev/null)" "null"
+assert_contains "absent cache_expires_at is null" "$(jq -r '.cache_expires_at|type' "$abs_json" 2>/dev/null)" "null"
+assert_not_contains "never renders as 1970" \
+  "$(jq -r '[.resets_5h,.resets_7d,.cache_expires_at]|map(if .==null then "null" else (.|todate) end)|join(",")' "$abs_json" 2>/dev/null)" "1970"
+# A real percentage of 0 is still 0 -- only timestamps become null.
+assert_contains "a genuine 0 percent stays 0" "$(jq -r '.used_5h_pct' "$abs_json" 2>/dev/null)" "0"
+
+# Present timestamps are unaffected.
+assert_contains "present resets_5h is still a number" "$(jq -r '.resets_5h|type' "$jsnap" 2>/dev/null)" "number"
+
 # A quote in cwd must not produce invalid JSON.
 q_session="json-quote-$$"
 run "$(echo "$BASE" | jq '.session_id = "'"$q_session"'" | .cwd = "/tmp/a \"b\" c"')" >/dev/null
