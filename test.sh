@@ -469,6 +469,40 @@ CLAUDE_HUD_SNAPSHOT_DIR=none run "$(echo "$BASE" | jq '.session_id = "opt-out"')
 assert_contains "CLAUDE_HUD_SNAPSHOT_DIR=none writes nothing" \
   "$(ls -1 "$SNAPSHOT_DIR" | wc -l | tr -d ' ')" "$before"
 
+section "Snapshot JSON sidecar"
+JSON_SESSION="json-test-$$"
+json_payload=$(echo "$BASE" | jq '.session_id = "'"$JSON_SESSION"'"
+  | .prompt_cache = {caching_observed:true, warm:true, ttl:"1h", hit_ratio:0.99, expires_at:'"$FUTURE"'}
+  | .rate_limits.seven_day = {used_percentage:87, resets_at:'"$WEEK_FUTURE"'}')
+run "$json_payload" >/dev/null
+jsnap="$SNAPSHOT_DIR/${JSON_SESSION}.json"
+
+assert_contains "writes a .json beside the .txt" "$([ -f "$jsnap" ] && echo yes || echo no)" "yes"
+assert_contains "is valid JSON" "$(jq -e . "$jsnap" >/dev/null 2>&1 && echo yes || echo no)" "yes"
+
+# Epochs, not clock strings -- the whole point of the sidecar.
+assert_contains "resets_5h is the raw epoch" "$(jq -r .resets_5h "$jsnap" 2>/dev/null)" "$FUTURE"
+assert_contains "resets_7d is the raw epoch" "$(jq -r .resets_7d "$jsnap" 2>/dev/null)" "$WEEK_FUTURE"
+assert_contains "carries 7d usage" "$(jq -r .used_7d_pct "$jsnap" 2>/dev/null)" "87"
+assert_contains "cache_warm is a real boolean" "$(jq -r '.cache_warm|type' "$jsnap" 2>/dev/null)" "boolean"
+assert_contains "cost is a number, not a \$-string" "$(jq -r '.cost_usd|type' "$jsnap" 2>/dev/null)" "number"
+assert_contains "rendered_at is recent" \
+  "$(jq -r --argjson now "$(date +%s)" 'if ($now - .rendered_at) < 60 then "fresh" else "stale" end' "$jsnap" 2>/dev/null)" "fresh"
+
+# A quote in cwd must not produce invalid JSON.
+q_session="json-quote-$$"
+run "$(echo "$BASE" | jq '.session_id = "'"$q_session"'" | .cwd = "/tmp/a \"b\" c"')" >/dev/null
+assert_contains "survives a quote in cwd" \
+  "$(jq -e . "$SNAPSHOT_DIR/${q_session}.json" >/dev/null 2>&1 && echo yes || echo no)" "yes"
+
+# Never leave a half-written object behind.
+assert_contains "no .tmp files left" "$(ls -1 "$SNAPSHOT_DIR" | grep -c '\.tmp$')" "0"
+
+# Opt-out covers the sidecar too.
+CLAUDE_HUD_SNAPSHOT_DIR=none run "$(echo "$BASE" | jq '.session_id = "json-optout"')" >/dev/null
+assert_contains "opt-out writes no sidecar" \
+  "$([ -f "$SNAPSHOT_DIR/json-optout.json" ] && echo yes || echo no)" "no"
+
 section "Terminal width (COLUMNS)"
 # No COLUMNS set → no wrapping, everything on one line.
 out=$(run "$BASE")

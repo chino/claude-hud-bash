@@ -46,7 +46,8 @@ mapfile -t F < <(printf '%s' "$data" | jq -r '
   ((.prompt_cache.hit_ratio // 0) * 100 | round),
   (.context_window.total_input_tokens // 0),
   (.cwd // ""),
-  (.session_id // "")' 2>/dev/null)
+  (.session_id // ""),
+  (.cost.total_cost_usd // 0)' 2>/dev/null)
 
 # Defaults mirror the // fallbacks above, so malformed JSON degrades to the
 # same empty statusline it always did instead of printing raw bash.
@@ -66,6 +67,7 @@ cache_hit_pct=${F[12]:-0}
 context_input_tokens=${F[13]:-0}
 cwd=${F[14]-}
 session_id=${F[15]-}
+cost_usd=${F[16]:-0}
 project=$(basename "$cwd")
 
 to_epoch() {
@@ -532,6 +534,35 @@ if [[ $snapshot_dir != none ]] && mkdir -p "$snapshot_dir" 2>/dev/null; then
   snapshot_file="$snapshot_dir/${snapshot_name:-unknown}.txt"
   printf '%s\n' "${lines[@]}" | sed -E 's/\x1b\[[0-9;]*m//g' > "$snapshot_file" 2>/dev/null
 
+  # Structured sibling of the .txt. The rendered line is for humans: times are
+  # local clock strings ("1:30am", with ":00" dropped on the hour), numbers are
+  # embedded in bars and separators. A consumer that greps it back out has to
+  # re-derive what this script already knows -- and worse, fails silently when
+  # the format shifts, since a missing match just looks like "no data".
+  #
+  # Built with printf rather than jq: this runs on every render, and a fork
+  # here would give back a chunk of what collapsing the jq calls above bought.
+  # Epochs are emitted raw, so no consumer has to guess today-vs-tomorrow the
+  # way a bare clock time forces.
+  json_escape() { local v=${1//\\/\\\\}; printf '%s' "${v//\"/\\\"}"; }
+  cache_warm_json=false; [[ $cache_warm == "true" ]] && cache_warm_json=true
+  printf '{"session_id":"%s","rendered_at":%s,"model":"%s","cwd":"%s","project":"%s",' \
+    "$(json_escape "$session_id")" "$now" "$(json_escape "$model")" \
+    "$(json_escape "$cwd")" "$(json_escape "$project")" \
+    > "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
+  printf '"ctx_pct":%s,"context_input_tokens":%s,"used_5h_pct":%s,"resets_5h":%s,' \
+    "${ctx:-0}" "${context_input_tokens:-0}" "${usage_5h:-0}" "${resets_at:-0}" \
+    >> "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
+  printf '"used_7d_pct":%s,"resets_7d":%s,"cache_observed":%s,"cache_warm":%s,' \
+    "${usage_7d:-0}" "${resets_7d:-0}" "${cache_observed:-false}" "$cache_warm_json" \
+    >> "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
+  printf '"cache_expires_at":%s,"cache_hit_pct":%s,"cost_usd":%s,"duration_ms":%s}\n' \
+    "${cache_expires_at:-0}" "${cache_hit_pct:-0}" "${cost_usd:-0}" "${duration_ms:-0}" \
+    >> "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
+  # Rename into place so a reader never catches a half-written object.
+  mv -f "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" \
+        "$snapshot_dir/${snapshot_name:-unknown}.json" 2>/dev/null
+
   # Sessions come and go; prune abandoned snapshots at most once a day so this
   # doesn't accumulate one file per session forever. Cheap — one flat dir.
   prune_stamp="$snapshot_dir/.pruned"
@@ -539,7 +570,7 @@ if [[ $snapshot_dir != none ]] && mkdir -p "$snapshot_dir" 2>/dev/null; then
   [[ -f $prune_stamp ]] && prune_age=$(( now - $(date -r "$prune_stamp" +%s 2>/dev/null || echo 0) ))
   if (( prune_age >= 86400 )); then
     : > "$prune_stamp"
-    find "$snapshot_dir" -maxdepth 1 -name '*.txt' -mtime +7 -delete 2>/dev/null
+    find "$snapshot_dir" -maxdepth 1 \( -name '*.txt' -o -name '*.json' \) -mtime +7 -delete 2>/dev/null
   fi
 fi
 

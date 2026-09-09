@@ -144,6 +144,7 @@ and is safe to delete at any point:
 | --- | --- |
 | `token-budget` | Plan detection, re-read at most once a minute |
 | `calib-cents` / `calib-stamp` | Self-calibrated window size, refreshed at most once per `CLAUDE_HUD_CALIB_INTERVAL` |
+| `status/<session-id>.json` | The same values in machine-readable form — see below |
 | `status/<session-id>.txt` | A plain-text copy of the current status line (colors stripped) — lets anything without a terminal (`cat`) read your current usage. Pruned after 7 days. Set `CLAUDE_HUD_SNAPSHOT_DIR=none` to disable |
 
 ### Reading the status line from outside the terminal
@@ -155,6 +156,25 @@ agent checking its own budget before starting expensive work, a second pane:
 ```bash
 cat ~/.cache/claude-hud/status/<session-id>.txt
 ```
+
+A `<session-id>.json` sidecar carries the same values structurally, so scripts
+never have to scrape the rendered line:
+
+```bash
+jq -r .resets_5h ~/.cache/claude-hud/status/<session-id>.json   # epoch, not "1:30am"
+```
+
+```json
+{"session_id":"...","rendered_at":1788920840,"model":"Opus 5","cwd":"/home/dan/projects",
+ "project":"projects","ctx_pct":69,"context_input_tokens":900000,"used_5h_pct":41,
+ "resets_5h":1788928040,"used_7d_pct":87,"resets_7d":1789220840,"cache_observed":true,
+ "cache_warm":true,"cache_expires_at":1788928040,"cache_hit_pct":99,"cost_usd":2.53,
+ "duration_ms":300000}
+```
+
+Times are raw epochs, so no consumer has to parse a local clock string or guess
+whether `1:30am` means today or tomorrow. It is written to a `.tmp` and renamed,
+so a reader never catches a partial object.
 
 Each session writes its own file, named for its session id. There is
 deliberately no "latest" alias: with several sessions running it would just
