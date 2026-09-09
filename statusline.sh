@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Claude Code statusLine script — claude-hud style
+shopt -s extglob   # visible_width() strips ANSI with an extended glob
 data=$(cat)
 
 RESET=$'\e[0m'
@@ -441,11 +442,12 @@ make_bar() {
   local pct=$1 color=$2 width=${3:-10}
   (( pct < 0 )) && pct=0; (( pct > 100 )) && pct=100
   local filled=$(( pct * width / 100 )) empty=$(( width - pct * width / 100 ))
-  local bar="${color}"
-  for _ in $(seq 1 $filled 2>/dev/null); do bar="${bar}█"; done
-  bar="${bar}${DIM}"
-  for _ in $(seq 1 $empty 2>/dev/null); do bar="${bar}░"; done
-  printf '%s%s' "$bar" "$RESET"
+  # printf pads to a width, then substitution swaps the padding for the block
+  # character. This used to fork `seq` twice per bar, three bars per render.
+  local f='' e=''
+  printf -v f '%*s' "$filled" ''
+  printf -v e '%*s' "$empty" ''
+  printf '%s%s%s%s%s' "$color" "${f// /█}" "$DIM" "${e// /░}" "$RESET"
 }
 
 ctx_bar=$(make_bar "$ctx" "$CTX_COLOR")
@@ -462,12 +464,18 @@ cols=${COLUMNS:-0}
 # double-width emoji this script prints (bash counts each codepoint as 1,
 # terminals render them as 2) and for the invisible U+FE0F variation selector
 # (counted as 1 codepoint by bash, 0 cells on screen).
+# Called once per segment inside the wrapping loop, so it ran on the order of
+# 24 processes per render (sed + 2 greps + 2 wc, per segment) whenever COLUMNS
+# was set -- which is always, under Claude Code. All of it is native bash:
+# extglob strips the SGR sequences, and each count is a length difference after
+# removing the characters in question. Character semantics (not bytes) come
+# from the UTF-8 locale, exactly as the old ${#stripped} already assumed.
 visible_width() {
-  local stripped wide vs16
-  stripped=$(sed -E 's/\x1b\[[0-9;]*m//g' <<< "$1")
-  wide=$(grep -oE '🔥|🔌|🪝|⏱' <<< "$stripped" | wc -l)
-  vs16=$(grep -oE $'\xef\xb8\x8f' <<< "$stripped" | wc -l)
-  echo $(( ${#stripped} + wide - vs16 ))
+  local s=${1//$'\e['*([0-9;])m/}
+  local n=${#s}
+  local no_wide=${s//[🔥🔌🪝⏱]/}
+  local no_vs16=${s//$'\ufe0f'/}
+  echo $(( n + (n - ${#no_wide}) - (n - ${#no_vs16}) ))
 }
 
 # ── Assemble line ─────────────────────────────────────────────────────────────
