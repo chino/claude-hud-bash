@@ -48,7 +48,8 @@ mapfile -t F < <(printf '%s' "$data" | jq -r '
   (.context_window.total_input_tokens // 0),
   (.cwd // ""),
   (.session_id // ""),
-  (.cost.total_cost_usd // 0)' 2>/dev/null)
+  (.cost.total_cost_usd // 0),
+  (.version // "")' 2>/dev/null)
 
 # Defaults mirror the // fallbacks above, so malformed JSON degrades to the
 # same empty statusline it always did instead of printing raw bash.
@@ -69,6 +70,7 @@ context_input_tokens=${F[13]:-0}
 cwd=${F[14]-}
 session_id=${F[15]-}
 cost_usd=${F[16]:-0}
+cc_version=${F[17]-}
 project=$(basename "$cwd")
 
 to_epoch() {
@@ -86,34 +88,38 @@ cache_expires_at=$(to_epoch "$cache_expires_raw")
 # script caches lives under one directory there and can be deleted at any time.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-hud"
 
-# ── Plan budgets ──────────────────────────────────────────────────────────────
-# Two budgets are derived from the plan, in different units:
+# Measured tokens/min from the background calibration scan. Read here rather
+# than with the other calibration values further down, because the burn-rate
+# block below renders it and runs first.
+calib_tpm=0
+[[ -f "$CACHE_DIR/calib-tokens" ]] && calib_tpm=$(cat "$CACHE_DIR/calib-tokens" 2>/dev/null || echo 0)
+[[ $calib_tpm =~ ^[0-9]+$ ]] || calib_tpm=0
+
+# ── Window value (for the cold-cache reheat estimate) ─────────────────────────
+# window_cents — the API-equivalent value of a 5h window, in US cents.
 #
-#   token_budget  — tokens per 5h window. Used by burn rate / time-to-cap.
-#   window_cents  — API-equivalent value of a 5h window, in US cents. Used by
-#                   the cold-cache reheat estimate.
-#
-# The second exists because no single token count describes a 5h window --
-# Anthropic meters value, not tokens, so cache-write-heavy and cache-read-heavy
-# windows cannot be compared by counting tokens. See docs/cold-reheat.md for
-# the measurements behind this; do not "simplify" the reheat estimate back to
-# a token budget.
+# This is in cents rather than tokens because no single token count describes a
+# 5h window: Anthropic meters value, not tokens, so cache-write-heavy and
+# cache-read-heavy windows cannot be compared by counting tokens. See
+# docs/cold-reheat.md for the measurements behind this; do not "simplify" the
+# reheat estimate back to a token budget. Burn rate and time-to-cap used to
+# carry a parallel token budget and inherited exactly that error -- they are
+# now derived from used_percentage and resets_at alone and need no constant.
 #
 # Cached for 60s — credentials rarely change and jq parsing adds latency.
-budget_cache="$CACHE_DIR/token-budget"
-token_budget=${CLAUDE_HUD_TOKEN_BUDGET:-0}
+budget_cache="$CACHE_DIR/window-cents"
 window_cents=${CLAUDE_HUD_WINDOW_CENTS:-0}
 
 if [[ -f $budget_cache ]]; then
   cache_age=$(( $(date +%s) - $(date -r "$budget_cache" +%s 2>/dev/null || echo 0) ))
   if (( cache_age < 60 )); then
-    read -r cached_tokens cached_cents < "$budget_cache"
-    (( token_budget == 0 )) && token_budget=${cached_tokens:-0}
+    read -r cached_cents < "$budget_cache"
+    [[ $cached_cents =~ ^[0-9]+$ ]] || cached_cents=0
     (( window_cents == 0 )) && window_cents=${cached_cents:-0}
   fi
 fi
 
-if (( token_budget == 0 || window_cents == 0 )); then
+if (( window_cents == 0 )); then
   creds="${CLAUDE_HUD_CREDENTIALS:-$HOME/.claude/.credentials.json}"
   if [[ -f $creds ]]; then
     plan=$(jq -r '.claudeAiOauth.subscriptionType // ""' "$creds" 2>/dev/null)
@@ -121,15 +127,9 @@ if (( token_budget == 0 || window_cents == 0 )); then
     # rateLimitTier is a decorated slug, not a bare one — a Max 5x account
     # reports "default_claude_max_5x" — so match the tier anywhere in the
     # string. 20x is checked first only for readability; the two can't collide.
-    case "$plan:$tier" in
-      pro:*)         plan_tokens=88000   ;;
-      max:*max_20x*) plan_tokens=1760000 ;;
-      max:*max_5x*)  plan_tokens=440000  ;;
-      *max*)         plan_tokens=440000  ;;
-      *)             plan_tokens=88000   ;;
-    esac
-    # Max 5x is the measured anchor ($120/window, see above); Pro and Max 20x
-    # are that scaled by the nominal plan multipliers, which is a guess.
+    #
+    # Max 5x is the measured anchor ($120/window); Pro and Max 20x are that
+    # scaled by the nominal plan multipliers, which is a guess.
     case "$plan:$tier" in
       pro:*)         plan_cents=2400  ;;
       max:*max_20x*) plan_cents=48000 ;;
@@ -138,9 +138,8 @@ if (( token_budget == 0 || window_cents == 0 )); then
       *)             plan_cents=2400  ;;
     esac
     mkdir -p "$CACHE_DIR"
-    printf '%s %s\n' "$plan_tokens" "$plan_cents" > "$budget_cache"
-    (( token_budget == 0 )) && token_budget=$plan_tokens
-    (( window_cents == 0 )) && window_cents=$plan_cents
+    printf '%s\n' "$plan_cents" > "$budget_cache"
+    window_cents=$plan_cents
   fi
 fi
 
@@ -154,33 +153,82 @@ burn_label=""
 ttc_label=""
 now=$(date +%s)
 
-if (( resets_at > now && usage_5h > 0 )); then
-  window_start=$(( resets_at - 18000 ))
-  elapsed_secs=$(( now - window_start ))
+# Compact duration: "45m", "3h20m", "2d4h". A bare "0.4d" is unreadable when
+# what it means is "about nine hours".
+fmt_dur() {
+  local m=$1
+  if   (( m < 60 ));   then printf '%dm' "$m"
+  elif (( m < 1440 )); then printf '%dh%dm' $(( m / 60 )) $(( m % 60 ))
+  else                      printf '%dd%dh' $(( m / 1440 )) $(( (m % 1440) / 60 ))
+  fi
+}
 
-  if (( elapsed_secs > 60 && token_budget > 0 )); then
-    tokens_used=$(( token_budget * usage_5h / 100 ))
-    tokens_per_min=$(( tokens_used * 60 / elapsed_secs ))
+# Both windows use the same maths -- percent consumed per unit of time, and the
+# time until 100% at that pace. Neither needs to know the window's size in
+# tokens or dollars, only the percentage the payload already reports, so this
+# works identically for the 5h and the 7d window. $4 is the rate's unit in
+# seconds (3600 = per hour, 86400 = per day).
+#
+# Sets burn_x10 (tenths of a percent per unit) and mins_to_cap (-1 = unknown,
+# 0 = already at the cap).
+window_burn() {
+  local used=$1 resets=$2 window=$3 per=$4 elapsed
+  burn_x10=0; mins_to_cap=-1
+  (( used >= 100 )) && { mins_to_cap=0; return; }
+  (( resets > now && used > 0 )) || return
+  elapsed=$(( now - (resets - window) ))
+  (( elapsed > 60 )) || return
+  burn_x10=$(( used * per * 10 / elapsed ))
+  (( burn_x10 > 0 )) && mins_to_cap=$(( (100 - used) * elapsed / (used * 60) ))
+}
 
-    if (( tokens_per_min >= 1000 )); then
-      burn_label="🔥 ${YELLOW}$(( tokens_per_min / 1000 ))k/m${RESET}"
-    elif (( tokens_per_min > 0 )); then
-      burn_label="🔥 ${YELLOW}${tokens_per_min}/m${RESET}"
-    fi
+fmt_burn() {   # tenths -> "12%/h" or "0.4%/h"
+  local x=$1 unit=$2
+  if (( x >= 100 )); then printf '%d%%/%s' $(( x / 10 )) "$unit"
+  else printf '%d.%d%%/%s' $(( x / 10 )) $(( x % 10 )) "$unit"
+  fi
+}
 
-    if (( tokens_per_min > 0 && usage_5h < 100 )); then
-      tokens_remaining=$(( token_budget - tokens_used ))
-      mins_to_cap=$(( tokens_remaining / tokens_per_min ))
-      if   (( mins_to_cap < 60 ));  then ttc_color=$RED
-      elif (( mins_to_cap < 120 )); then ttc_color=$YELLOW
-      else                               ttc_color=$DIM; fi
+window_burn "$usage_5h" "$resets_at" 18000 3600
+burn_5h_x10=$burn_x10; ttc_5h=$mins_to_cap
+window_burn "$usage_7d" "$resets_7d" 604800 86400
+burn_7d_x10=$burn_x10; ttc_7d=$mins_to_cap
 
-      if (( mins_to_cap < 60 )); then
-        ttc_label=" ${ttc_color}~${mins_to_cap}m${RESET}"
-      else
-        ttc_label=" ${ttc_color}~$(( mins_to_cap / 60 ))h$(( mins_to_cap % 60 ))m${RESET}"
-      fi
-    fi
+# Measured tokens/min sits next to the percentage rather than replacing it:
+# the percentage is what the server actually meters you on, the token count is
+# the physical throughput behind it. Dim, because it is a local-only estimate
+# refreshed on the calibration's cadence, not a live figure.
+tok_label=""
+if (( calib_tpm >= 1000000 )); then
+  tok_label=" ${DIM}$(( calib_tpm / 100000 / 10 )).$(( calib_tpm / 100000 % 10 ))M/m${RESET}"
+elif (( calib_tpm >= 1000 )); then
+  tok_label=" ${DIM}$(( calib_tpm / 1000 ))k/m${RESET}"
+elif (( calib_tpm > 0 )); then
+  tok_label=" ${DIM}${calib_tpm}/m${RESET}"
+fi
+
+if (( burn_5h_x10 > 0 )); then
+  burn_label="🔥 ${YELLOW}$(fmt_burn "$burn_5h_x10" h)${RESET}${tok_label}"
+  if (( ttc_5h > 0 )); then
+    if   (( ttc_5h < 60 ));  then ttc_color=$RED
+    elif (( ttc_5h < 120 )); then ttc_color=$YELLOW
+    else                          ttc_color=$DIM; fi
+    ttc_label=" ${ttc_color}~$(fmt_dur "$ttc_5h")${RESET}"
+  fi
+fi
+
+# The weekly burn rides along with the 7d segment rather than standing alone,
+# so it appears and disappears with the bar it describes instead of needing its
+# own visibility rule. Thresholds are in days, not hours: a weekly window with
+# two hours left is far more urgent than a 5h window in the same state.
+burn_7d_label=""
+if (( burn_7d_x10 > 0 )); then
+  burn_7d_label=" 🔥 ${YELLOW}$(fmt_burn "$burn_7d_x10" d)${RESET}"
+  if (( ttc_7d > 0 )); then
+    if   (( ttc_7d < 720 ));  then ttc7_color=$RED
+    elif (( ttc_7d < 2880 )); then ttc7_color=$YELLOW
+    else                           ttc7_color=$DIM; fi
+    burn_7d_label+=" ${ttc7_color}~$(fmt_dur "$ttc_7d")${RESET}"
   fi
 fi
 
@@ -218,8 +266,12 @@ if (( resets_at > now && usage_5h >= calib_min_pct )); then
     : > "$calib_stamp"
     (
       window_start=$(( resets_at - 18000 ))
-      # Output prices are 5x input, cache writes 2x (1h) and reads 0.1x, for
-      # every current model — so one input price per model covers all four.
+      # Prices in cents per million input tokens. Output is 5x input and cache
+      # writes 2x on every current model, so one input price covers those --
+      # but cache READS are not uniformly 0.1x: Fable/Mythos read at a flat
+      # $0.25/MTok, not a tenth of their $10 input rate, so the read rate is
+      # tracked separately. Anything unmatched falls through to Sonnet 5's $2;
+      # Sonnet 4.6 is $3 and needs its own arm.
       spent=$(find "$HOME/.claude/projects" -name '*.jsonl' -newermt "@$window_start" -print0 2>/dev/null \
         | xargs -0 -r grep -h '"type":"assistant"' 2>/dev/null \
         | jq -rc --argjson start "$window_start" '
@@ -233,9 +285,22 @@ if (( resets_at > now && usage_5h >= calib_min_pct )); then
                 (.message.usage.cache_read_input_tokens // 0) ] | @tsv' 2>/dev/null \
         | sort -u -k1,1 \
         | awk -F'\t' '
-            { p = ($2 ~ /opus/) ? 500 : ($2 ~ /haiku/) ? 100 : 200
-              c += ($3*p + $4*p*5 + $5*p*2 + $6*p/10) / 1000000 }
-            END { printf "%d", c + 0 }')
+            { if      ($2 ~ /fable|mythos/) { p = 1000; cr = 25 }
+              else if ($2 ~ /opus/)         { p = 500;  cr = p/10 }
+              else if ($2 ~ /haiku/)        { p = 100;  cr = p/10 }
+              else if ($2 ~ /sonnet-4-6/)   { p = 300;  cr = p/10 }
+              else                          { p = 200;  cr = p/10 }
+              c += ($3*p + $4*p*5 + $5*p*2 + $6*cr) / 1000000
+                t += $3 + $4 + $5 + $6 }
+            END { printf "%d %d", c + 0, t + 0 }')
+      # The scan already summed real tokens; it used to discard them. Emitting
+      # measured throughput costs nothing extra here. Local machine only, so it
+      # undercounts if another device shares the account.
+      read -r spent scanned_tokens <<< "$spent"
+      elapsed_min=$(( (now - window_start) / 60 ))
+      if (( elapsed_min > 0 )) && [[ $scanned_tokens =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$(( scanned_tokens / elapsed_min ))" > "$CACHE_DIR/calib-tokens" 2>/dev/null
+      fi
       [[ $spent =~ ^[0-9]+$ ]] || exit 0
       (( spent > 0 )) || exit 0
       sample=$(( spent * 100 / usage_5h ))
@@ -250,6 +315,115 @@ if (( resets_at > now && usage_5h >= calib_min_pct )); then
       fi
     ) >/dev/null 2>&1 &
     disown 2>/dev/null
+  fi
+fi
+
+# ── Per-model usage, opt-in ───────────────────────────────────────────────────
+# The statusline payload carries only aggregate five_hour/seven_day windows.
+# GET /api/oauth/usage additionally returns per-model weekly windows in its
+# limits[] array (kind="weekly_scoped", scope.model.display_name) -- the one
+# thing the payload genuinely cannot tell you. Verified against the payload:
+# the aggregate numbers match to the percentage point, so this adds the
+# per-model breakdown and nothing else.
+#
+# Off by default (CLAUDE_HUD_USAGE_API=1 to enable). It is an undocumented
+# internal endpoint that a release can reshape without notice, it sends your
+# OAuth token, and it is subject to an open 429 bug that depends on the exact
+# User-Agent. Nothing here is load-bearing: every failure path leaves the line
+# exactly as it would have been.
+usage_models=""
+if [[ ${CLAUDE_HUD_USAGE_API:-0} == 1 ]]; then
+  usage_cache="$CACHE_DIR/usage-api.json"
+  usage_lock="$CACHE_DIR/usage-api.lock"
+  # The fetch is backgrounded and never blocks a render, and the lock means one
+  # fetch per interval across ALL sessions, not per session -- so the interval
+  # buys request volume, nothing else. Kept close to the render cadence on
+  # purpose: a long interval leaves the server numbers visibly frozen while the
+  # local ones tick, which reads like a bug rather than a slower sample.
+  usage_interval=${CLAUDE_HUD_USAGE_INTERVAL:-30}
+
+  usage_age=$usage_interval
+  [[ -f $usage_cache ]] && usage_age=$(( now - $(date -r "$usage_cache" +%s 2>/dev/null || echo 0) ))
+
+  # A crashed fetch would otherwise hold the lock forever.
+  if [[ -d $usage_lock ]]; then
+    lock_age=$(( now - $(date -r "$usage_lock" +%s 2>/dev/null || echo 0) ))
+    (( lock_age > 120 )) && rmdir "$usage_lock" 2>/dev/null
+  fi
+
+  # mkdir is atomic, so exactly one of several concurrent sessions fetches.
+  if (( usage_age >= usage_interval )) && mkdir -p "$CACHE_DIR" 2>/dev/null \
+     && mkdir "$usage_lock" 2>/dev/null; then
+    (
+      trap 'rmdir "$usage_lock" 2>/dev/null' EXIT
+      tok=$(jq -r '.claudeAiOauth.accessToken // empty' \
+        "${CLAUDE_HUD_CREDENTIALS:-$HOME/.claude/.credentials.json}" 2>/dev/null)
+      [[ -n $tok ]] || exit 0
+      curl -sf --max-time 10 \
+        -H "Authorization: Bearer $tok" \
+        -H "User-Agent: claude-cli/${cc_version:-2.0.0} (external, cli)" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        https://api.anthropic.com/api/oauth/usage > "$usage_cache.tmp" 2>/dev/null \
+        && mv -f "$usage_cache.tmp" "$usage_cache" 2>/dev/null
+      rm -f "$usage_cache.tmp" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    disown 2>/dev/null
+  fi
+
+  # Render from whatever the cache holds. A missing, stale, or malformed cache
+  # simply produces no segment -- the percentage-based line stands on its own.
+  if [[ -f $usage_cache ]]; then
+    # Show the server's own aggregates next to the per-model rows, so the
+    # payload-derived numbers on the left can be compared against their source
+    # rather than taken on trust.
+    # Aggregates and per-model rows are read separately: the aggregates have a
+    # local counterpart to compare against, the per-model rows have none and so
+    # are always worth showing.
+    mapfile -t U < <(jq -r '
+      (.five_hour.utilization // 0 | floor),
+      (.seven_day.utilization // 0 | floor),
+      ([ .limits[]?
+         | select(.kind == "weekly_scoped")
+         | select((.scope.model.display_name // "") != "")
+         | "\(.scope.model.display_name) \(.percent // 0 | floor)%" ] | join(" "))
+      ' "$usage_cache" 2>/dev/null)
+    srv_5h=${U[0]:-}; srv_7d=${U[1]:-}; srv_models=${U[2]-}
+    [[ $srv_5h =~ ^[0-9]+$ ]] || srv_5h=""
+    [[ $srv_7d =~ ^[0-9]+$ ]] || srv_7d=""
+
+    # CLAUDE_HUD_USAGE_DRIFT=N hides the server aggregates unless they disagree
+    # with the payload by N points or more -- useful once the two have proven
+    # they track, so the line only speaks up when they diverge. 0 (default)
+    # always shows them, which is what you want while still comparing.
+    usage_drift=${CLAUDE_HUD_USAGE_DRIFT:-0}
+    show_aggregates=1
+    if (( usage_drift > 0 )) && [[ -n $srv_5h && -n $srv_7d ]]; then
+      d5=$(( srv_5h - usage_5h )); (( d5 < 0 )) && d5=$(( -d5 ))
+      d7=$(( srv_7d - usage_7d )); (( d7 < 0 )) && d7=$(( -d7 ))
+      (( d5 >= usage_drift || d7 >= usage_drift )) || show_aggregates=0
+    fi
+
+    usage_models=""
+    if (( show_aggregates )) && [[ -n $srv_5h && -n $srv_7d ]]; then
+      usage_models="5h ${srv_5h}% 7d ${srv_7d}%"
+    fi
+    [[ -n $srv_models ]] && usage_models="${usage_models:+$usage_models }${srv_models}"
+
+    # Age is part of the reading, not decoration: these numbers are sampled, and
+    # a stalled fetch should be obvious rather than quietly showing an old value
+    # that looks live. Yellow once older than two intervals -- what a failing
+    # fetch looks like.
+    if [[ -n $usage_models ]]; then
+      usage_data_age=$(( now - $(date -r "$usage_cache" +%s 2>/dev/null || echo "$now") ))
+      (( usage_data_age < 0 )) && usage_data_age=0
+      if   (( usage_data_age < 60 ));   then usage_age_str="${usage_data_age}s"
+      elif (( usage_data_age < 3600 )); then usage_age_str="$(( usage_data_age / 60 ))m"
+      else                                   usage_age_str="$(( usage_data_age / 3600 ))h"
+      fi
+      usage_age_color=$DIM
+      (( usage_data_age > usage_interval * 2 )) && usage_age_color=$YELLOW
+      usage_models="${usage_models} ${usage_age_color}${usage_age_str}${RESET}"
+    fi
   fi
 fi
 
@@ -346,10 +520,14 @@ if [[ $cache_observed == "true" ]]; then
         *5m*) write_mult="1.25" ;;
         *)    write_mult="2"    ;;
       esac
+      # Same table as the calibration scan above, matched on display name.
+      # Only the input rate matters here -- a reheat is a cache *write*.
       case "$(printf '%s' "$model" | tr 'A-Z' 'a-z')" in
-        *opus*)  in_price=500 ;;
-        *haiku*) in_price=100 ;;
-        *)       in_price=200 ;;
+        *fable*|*mythos*) in_price=1000 ;;
+        *opus*)           in_price=500  ;;
+        *haiku*)          in_price=100  ;;
+        *sonnet\ 4.6*)    in_price=300  ;;
+        *)                in_price=200  ;;
       esac
       reheat_cents=$(jq -n --argjson tok "$context_input_tokens" --argjson price "$in_price" \
         --argjson mult "$write_mult" '($tok * $price * $mult / 1000000)')
@@ -494,13 +672,14 @@ segments+=("${DIM}ctx${RESET} ${ctx_bar} ${CTX_COLOR}${ctx}%${RESET}")
 [[ -n $cache_label ]] && segments+=("$cache_label")
 segments+=("${DIM}5h${RESET} ${usage_bar} ${USAGE_COLOR}${usage_5h}%${reset_label}${RESET}")
 (( usage_7d >= 100 - WEEKLY_SHOW_AT_REMAINING )) && \
-  segments+=("${DIM}7d${RESET} ${weekly_bar} ${WEEKLY_COLOR}${usage_7d}%${weekly_reset_label}${RESET}")
+  segments+=("${DIM}7d${RESET} ${weekly_bar} ${WEEKLY_COLOR}${usage_7d}%${weekly_reset_label}${RESET}${burn_7d_label}")
 [[ -n $burn_label ]] && segments+=("${burn_label}${ttc_label}")
 
 env=""
 (( mcps > 0 ))       && env+=" 🔌${mcps}"
 (( hooks > 0 ))      && env+=" 🪝${hooks}"
 [[ -n $env ]] && segments+=("${env# }")
+[[ -n $usage_models ]] && segments+=("${DIM}api${RESET} ${DIM}${usage_models}${RESET}")
 
 # Cost and duration are opt-in, off by default -- burn rate/time-to-cap
 # already cover "how much budget is left in this window", which is the
@@ -558,6 +737,22 @@ if [[ $snapshot_dir != none ]] && mkdir -p "$snapshot_dir" 2>/dev/null; then
   # the value was simply absent. Emit JSON null instead, which every consumer
   # already has to handle and which cannot be mistaken for a date.
   epoch_or_null() { (( ${1:-0} > 0 )) && printf '%s' "$1" || printf 'null'; }
+  num_or_null() { (( ${1:--1} >= 0 )) && printf '%s' "$1" || printf 'null'; }
+  # Which limit actually stops you, and when. A consumer that only watches the
+  # 5h window will happily keep working straight into a weekly wall, so this
+  # resolves both and names the binding one rather than making every reader
+  # re-derive it. blocked_now/blocked_until describe a cap already hit;
+  # binding_limit/blocked_at are the prediction at the current burn.
+  blocked_now=false; blocked_until=0
+  (( usage_5h >= 100 )) && { blocked_now=true; blocked_until=$resets_at; }
+  (( usage_7d >= 100 )) && { blocked_now=true; (( resets_7d > blocked_until )) && blocked_until=$resets_7d; }
+  binding=null; blocked_at=0
+  if (( ttc_5h >= 0 && ttc_7d >= 0 )); then
+    if (( ttc_5h <= ttc_7d )); then binding='"five_hour"'; blocked_at=$(( now + ttc_5h * 60 ))
+    else binding='"seven_day"'; blocked_at=$(( now + ttc_7d * 60 )); fi
+  elif (( ttc_5h >= 0 )); then binding='"five_hour"'; blocked_at=$(( now + ttc_5h * 60 ))
+  elif (( ttc_7d >= 0 )); then binding='"seven_day"'; blocked_at=$(( now + ttc_7d * 60 ))
+  fi
   cache_warm_json=false; [[ $cache_warm == "true" ]] && cache_warm_json=true
   printf '{"session_id":"%s","rendered_at":%s,"model":"%s","cwd":"%s","project":"%s",' \
     "$(json_escape "$session_id")" "$now" "$(json_escape "$model")" \
@@ -569,8 +764,17 @@ if [[ $snapshot_dir != none ]] && mkdir -p "$snapshot_dir" 2>/dev/null; then
   printf '"used_7d_pct":%s,"resets_7d":%s,"cache_observed":%s,"cache_warm":%s,' \
     "${usage_7d:-0}" "$(epoch_or_null "${resets_7d:-0}")" "${cache_observed:-false}" "$cache_warm_json" \
     >> "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
-  printf '"cache_expires_at":%s,"cache_hit_pct":%s,"cost_usd":%s,"duration_ms":%s}\n' \
+  printf '"cache_expires_at":%s,"cache_hit_pct":%s,"cost_usd":%s,"duration_ms":%s,' \
     "$(epoch_or_null "${cache_expires_at:-0}")" "${cache_hit_pct:-0}" "${cost_usd:-0}" "${duration_ms:-0}" \
+    >> "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
+  printf '"burn_5h_pct_per_hour":%s.%s,"burn_7d_pct_per_day":%s.%s,' \
+    $(( burn_5h_x10 / 10 )) $(( burn_5h_x10 % 10 )) $(( burn_7d_x10 / 10 )) $(( burn_7d_x10 % 10 )) \
+    >> "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
+  printf '"mins_to_cap_5h":%s,"mins_to_cap_7d":%s,"binding_limit":%s,"blocked_at":%s,' \
+    "$(num_or_null "$ttc_5h")" "$(num_or_null "$ttc_7d")" "$binding" "$(epoch_or_null "$blocked_at")" \
+    >> "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
+  printf '"blocked_now":%s,"blocked_until":%s}\n' \
+    "$blocked_now" "$(epoch_or_null "$blocked_until")" \
     >> "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" 2>/dev/null
   # Rename into place so a reader never catches a half-written object.
   mv -f "$snapshot_dir/${snapshot_name:-unknown}.json.tmp" \
