@@ -173,7 +173,9 @@ jq -r .resets_5h ~/.cache/claude-hud/status/<session-id>.json   # epoch, not "1:
 ```
 
 Times are raw epochs, so no consumer has to parse a local clock string or guess
-whether `1:30am` means today or tomorrow. It is written to a `.tmp` and renamed,
+whether `1:30am` means today or tomorrow. A timestamp the payload did not supply
+is `null`, never `0` — `0` is a real epoch and would render as `1970-01-01`,
+indistinguishable from a genuine date. Percentages keep a real `0`. It is written to a `.tmp` and renamed,
 so a reader never catches a partial object.
 
 Each session writes its own file, named for its session id. There is
