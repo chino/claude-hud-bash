@@ -11,8 +11,8 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 | **Context** | `ctx ████░░░░░░ 23%` | Context window usage. Turns yellow at 70%, red at 85% |
 | **Prompt cache** | `warm ~54m hit 87%` / `cold 829.5k 2-3% 5h` | Whether the main conversation's prompt cache is warm or cold, from `prompt_cache.warm`. Green while warm, shifting to yellow inside the last 20% of the TTL, red once cold. **Warm**: a countdown to `expires_at`, plus `hit N%` — the cache hit ratio. **Cold**: the tokens the next turn re-writes into the cache, then what that costs as a share of your 5-hour window under two independent estimates (see [Cold reheat cost](#cold-reheat-cost) and [docs/cold-reheat.md](docs/cold-reheat.md)); the hit ratio is dropped here since it's a backward-looking stat, not something that changes what the next turn costs. Hidden until the first API response of the session, since `prompt_cache` isn't in the payload before then |
 | **5h usage** | `5h ██░░░░░░░░ 22% 7pm` | Rolling 5-hour rate limit consumption + estimated reset time. Turns magenta at 75%, red at 90% |
-| **7d usage** | `7d ████░░░░░░ 41% sat` | Rolling 7-day rate limit consumption + reset. Hidden until it is worth the space — see [Weekly window](#weekly-window). Cyan by default, yellow at 75%, red at 90% |
-| **Burn rate** | `🔥 12k/m ~1h20m` | Tokens/min consumed in this window, plus estimated time until you hit the cap at the current rate |
+| **7d usage** | `7d ████░░░░░░ 41% sat 🔥 6%/d ~4d2h` | Rolling 7-day rate limit consumption, reset, and burn rate + time-to-cap in days. Hidden until it is worth the space — see [Weekly window](#weekly-window). Cyan by default, yellow at 75%, red at 90% |
+| **Burn rate** | `🔥 12%/h 579k/m ~1h20m` | Percent of the 5h window consumed per hour, measured token throughput, and estimated time to the cap. The token figure is real measured throughput from the calibration scan (local machine only) — dim, because it is a sampled estimate rather than a live number |
 | **Env** | `🔌2 🪝3` | Count of MCP servers (🔌) and hooks (🪝). Only shown when non-zero |
 | **Cost** | `$0.04` | Total API cost for the current session |
 | **Duration** | `⏱️ 5m` | How long the current Claude Code session has been running |
@@ -47,23 +47,34 @@ so the two are never confused at a glance.
 
 ### Burn rate & time-to-cap
 
-> **Note:** These are rough estimates. The statusline data exposes `used_percentage` (token consumption) and `resets_at` (window close time) but not `window_started_at` or absolute token counts. Until Claude Code exposes that data, the burn rate and time-to-cap use approximations that will improve over time.
+Both are derived from `used_percentage` and `resets_at` alone — the two things
+Claude Code actually reports — so neither needs a plan constant:
 
-Burn rate is computed as `tokens_used_in_window ÷ elapsed_window_minutes`, where token budget is detected from your plan, using `subscriptionType` and `rateLimitTier` in `~/.claude/.credentials.json`:
+```
+pct_per_hour = used_percentage / hours_elapsed_in_window
+mins_to_cap  = (100 - used_percentage) * elapsed_secs / (used_percentage * 60)
+```
 
-| Plan | `rateLimitTier` | Token budget (5h) |
-|------|-----------------|-------------------|
-| Pro | `default_claude_pro` | ~88,000 |
-| Max 5× | `default_claude_max_5x` | ~440,000 |
-| Max 20× | `default_claude_max_20x` | ~1,760,000 |
+Burn reads as a share of the window per unit time — `🔥 12%/h` for the 5h
+window, `🔥 6%/d` for the weekly — kept to one decimal below 10 so a slow burn
+doesn't floor to `0`. Because the maths needs only a percentage and a reset
+time, **both windows use it**; the weekly burn rides inside the 7d segment so
+it appears and disappears with the bar it describes.
 
-The tier is matched as a substring, since Anthropic reports it as a decorated slug (`default_claude_max_5x`, not `max_5x`). A `max` plan with an unrecognized tier falls back to the 5× budget; anything else falls back to the Pro budget. Upgrades are picked up automatically on the next render — the budget is re-read from the credentials file, not baked in — though the credentials file itself only refreshes when Claude Code renews its token, so a fresh upgrade may need a session restart (or `claude auth logout && claude auth login`) to show up.
+Time-to-cap is written as time, never a fraction of a day: `45m`, `3h20m`,
+`2d4h`. Urgency colours are per-window — the 5h is red under 1h and yellow
+1–2h; the weekly is red under 12h and yellow under 2 days, since a weekly
+window with two hours left is far more urgent than a 5h window in the same
+state.
 
-Set `CLAUDE_HUD_TOKEN_BUDGET` to override the table entirely if your plan isn't covered or you'd rather calibrate the number yourself.
-
-> **Known limitation:** these token figures are the *old* plan constants, and the calibration described in [docs/cold-reheat.md](docs/cold-reheat.md) shows that no single token count describes a 5-hour window — so burn rate and time-to-cap inherit that error. The cold reheat cost no longer uses them. Converting these two to the same cents-based budget (or to a constant-free `%/h`, since `used_percentage` and `resets_at` are enough on their own) is the next thing to fix.
-
-The time-to-cap estimate (`~1h20m`) is `remaining_tokens ÷ burn_rate`. Color indicates urgency: dim when >2h, yellow 1–2h, red <1h. It disappears at 100% usage. The budget is cached for 60s to avoid parsing latency on every render.
+This used to divide by a per-plan token budget (~88k Pro / ~440k Max 5× /
+~1.76M Max 20×) detected from `~/.claude/.credentials.json`. That budget was a
+guess, and [docs/cold-reheat.md](docs/cold-reheat.md) established that no single
+token count describes a 5-hour window — Anthropic meters value, not tokens — so
+both numbers inherited that error. The budget also cancelled out of time-to-cap
+algebraically, so it only ever affected the displayed rate. It is gone, along
+with `CLAUDE_HUD_TOKEN_BUDGET`; the cents-based `window_cents` remains, used
+only by the cold reheat estimate below.
 
 ### Cold reheat cost
 
@@ -134,6 +145,80 @@ The status line wraps across as many lines as needed to fit `COLUMNS` (passed in
 ### When it redraws
 
 Claude Code only re-runs the script on specific triggers: a new assistant message, `/compact` finishing, a permission-mode change, a vim-mode toggle, a warm prompt cache reaching its `expires_at` (so the cache segment above flips to cold right on schedule, even mid-tool-call), the 5-hour rate-limit window hitting its own `resets_at`, or the `refreshInterval` timer if you've set one. **Terminal resize is not one of them** — if you resize the window or a pane, the status line keeps rendering at the old width until the next trigger fires. This is a known upstream gap, not a bug in this script: [anthropics/claude-code#76988](https://github.com/anthropics/claude-code/issues/76988). Setting `refreshInterval` (see [Install](#install)) bounds how long a resize stays stale, at the cost of a script run every N seconds.
+
+## Per-model usage
+
+The statusline payload carries only aggregate `five_hour` / `seven_day`
+windows — [#52661](https://github.com/anthropics/claude-code/issues/52661),
+asking for per-model windows in the payload, was closed as *not planned*.
+
+`GET /api/oauth/usage` returns them in its `limits[]` array. Enable with:
+
+On by default:
+
+```bash
+CLAUDE_HUD_USAGE_API=0         # disable it entirely
+CLAUDE_HUD_USAGE_INTERVAL=60   # seconds between fetches (default 60)
+CLAUDE_HUD_USAGE_DRIFT=0       # hide the server aggregates unless they disagree
+                               # with the payload by N points (0 = always show)
+```
+
+```
+… │ 🔥 22%/h 579k/m ~1h31m │ Fable 7% │ ram 34% …
+```
+
+```
+… │ 5h ██████░░░░ 65% 4:09am │ 🔥 22%/h 579k/m ~1h31m │ api 5h 66% 7d 10% Fable 7% 8s │ …
+      ^ local, from the payload                          ^ server, sampled
+```
+
+The server's own aggregates render beside the local ones so the two can be
+compared directly, followed by the per-model rows and **the age of the sample**.
+The age matters: these numbers are fetched periodically, and without it a
+stalled fetch looks identical to a live value that happens not to move. It turns
+yellow once the data is older than two intervals.
+
+Set `CLAUDE_HUD_USAGE_DRIFT=N` once you trust the two sources to track each
+other — the aggregates then stay hidden until they disagree by N points. The
+per-model rows have no local counterpart, so they show either way.
+
+Fetched in a background subshell — it never blocks a render — at most once per
+interval, guarded by an atomic `mkdir` lock so one of several concurrent
+sessions fetches rather than all of them, with the lock force-cleared after 2
+minutes if a fetch dies. The interval buys request volume and nothing else,
+which is why it defaults to 30s rather than something long enough to leave the
+server numbers visibly frozen against the ticking local ones.
+
+**The local calculation is always primary.** The render only ever reads the
+cache, so a failed, missing, stale, corrupt, or never-fetched response produces
+no segment and changes nothing else on the line.
+
+**Why you might turn it off:** it is an undocumented internal endpoint that a
+release can reshape without notice, it sends your OAuth token to Anthropic (the
+same token and the same endpoint Claude Code itself uses), and it is subject to
+an [open 429 bug](https://github.com/anthropics/claude-code/issues/30930) that
+depends on the exact `User-Agent`. `CLAUDE_HUD_USAGE_API=0` disables it.
+
+That 429 is intermittent in practice, so a failed fetch **backs off
+exponentially** (interval × 2ⁿ, capped at 64×) and a successful one clears the
+backoff. Retrying into a refusal on a fixed cadence is what turns an occasional
+429 into a sustained one. While backing off, the line keeps showing the last
+successful sample with its real age — you lose freshness, not the segment.
+
+**It does not replace the payload.** Checked side by side, the aggregates agree
+to the percentage point (66% vs 65%, entirely explained by a 4-second snapshot
+age) and the reset timestamps match exactly. It adds the per-model breakdown and
+nothing else — `limit_dollars` is `null`, so it does **not** answer what a
+window is worth, which is why the plan table and calibration below still exist.
+
+To compare the two sources yourself:
+
+```bash
+jq -r '"server 5h \(.five_hour.utilization)%  7d \(.seven_day.utilization)%"' \
+  ~/.cache/claude-hud/usage-api.json
+jq -r '"local  5h \(.used_5h_pct)%  7d \(.used_7d_pct)%"' \
+  ~/.cache/claude-hud/status/<session-id>.json
+```
 
 ## Caching
 

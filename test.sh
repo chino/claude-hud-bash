@@ -94,6 +94,13 @@ with_fields() {
 # that need a calibration value seed the cache file directly instead.
 export CLAUDE_HUD_CALIB_MIN_PCT=101
 
+# The per-model usage fetch is on by default, so without this the whole suite
+# makes live authenticated API calls and renders whatever the account happens to
+# be at -- which collides with fixtures (a real "7d 56%" breaks the weekly-window
+# tests) and makes results depend on the network. The section that tests this
+# feature re-enables it explicitly against a fixture cache.
+export CLAUDE_HUD_USAGE_API=0
+
 # Snapshots go to a scratch dir so the suite never writes to the real cache.
 SNAPSHOT_DIR=$(mktemp -d)
 export CLAUDE_HUD_SNAPSHOT_DIR="$SNAPSHOT_DIR"
@@ -185,8 +192,22 @@ section "Burn rate & time-to-cap"
 # resets_at 1h in past = window 4h elapsed, 55% used → should show burn rate
 PAST_RESET=$(( $(date +%s) + 3600 ))  # 1h left in window = 4h elapsed
 out=$(run "$(with_fields '{"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":'"$PAST_RESET"'}}}')")
-assert_matches "shows burn rate" "$out" '[0-9]+[k]?/m'
+assert_matches "shows burn rate as percent-of-window per hour" "$out" '[0-9]+(\.[0-9])?%/h'
 assert_matches "shows time-to-cap" "$out" '~[0-9]+(m|h)'
+
+# No plan constants involved: burn rate must still appear with no credentials
+# file and no CLAUDE_HUD_WINDOW_CENTS, since it derives from the payload alone.
+out=$(CLAUDE_HUD_CREDENTIALS=/nonexistent bash -c 'echo "$1" | bash statusline.sh' _ \
+  "$(with_fields '{"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":'"$PAST_RESET"'}}}')" \
+  2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+assert_matches "burn rate needs no plan constants" "$out" '[0-9]+(\.[0-9])?%/h'
+assert_matches "time-to-cap needs no plan constants" "$out" '~[0-9]+(m|h)'
+
+# A slow burn must not floor to 0%/h -- that is why it is tracked in tenths.
+SLOW_RESET=$(( $(date +%s) + 3600 ))
+out=$(run "$(with_fields '{"rate_limits":{"five_hour":{"used_percentage":2,"resets_at":'"$SLOW_RESET"'}}}')")
+assert_matches "a slow burn keeps one decimal" "$out" '0\.[1-9]%/h'
+assert_not_contains "never shows a bare 0%/h" "$out" "0%/h "
 
 # No burn rate when usage is 0%
 out=$(run "$(with_fields '{"rate_limits":{"five_hour":{"used_percentage":0,"resets_at":'"$FUTURE"'}}}')")
@@ -195,6 +216,53 @@ assert_not_contains "no burn rate at 0%" "$out" "/m"
 # No time-to-cap at 100%
 out=$(run "$(with_fields '{"rate_limits":{"five_hour":{"used_percentage":100,"resets_at":'"$FUTURE"'}}}')")
 assert_not_contains "no time-to-cap at 100%" "$out" "cap ~"
+
+section "Weekly burn rate"
+w7() { with_fields '{"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":'"$PAST_RESET"'},
+       "seven_day":{"used_percentage":'"$1"',"resets_at":'"$2"'}}}'; }
+# 7d window ~3 days in, 60% used -> ~20%/day, ~2 days left.
+SEVEN_MID=$(( $(date +%s) + 4*86400 ))
+out=$(run "$(w7 60 "$SEVEN_MID")")
+assert_matches "shows weekly burn as percent per day" "$out" '[0-9]+(\.[0-9])?%/d'
+assert_matches "shows weekly time-to-cap" "$out" '7d [^|]*~[0-9]+'
+assert_matches "weekly burn sits inside the 7d segment" "$out" '7d .*%/d'
+
+# Durations read as time, not fractions: under a day must not render as "0d".
+out=$(run "$(w7 95 "$(( $(date +%s) + 86400 ))")")
+assert_not_contains "never renders a bare 0d duration" "$out" "~0d"
+assert_matches "sub-day weekly cap reads in hours or minutes" "$out" '7d [^|]*~[0-9]+[hm]'
+
+# Hidden with the segment it belongs to, not on its own rule.
+out=$(run "$(w7 5 "$SEVEN_MID")")
+assert_not_contains "no weekly burn when the 7d segment is hidden" "$out" "%/d"
+
+section "Binding limit (sidecar)"
+bl_session="binding-$$"
+BL_5H=$(( $(date +%s) + 3600 ))     # 5h window 4h in
+BL_7D=$(( $(date +%s) + 5*86400 ))  # 7d window 2d in
+run "$(echo "$BASE" | jq '.session_id="'"$bl_session"'"
+  | .rate_limits={five_hour:{used_percentage:90,resets_at:'"$BL_5H"'},
+                  seven_day:{used_percentage:20,resets_at:'"$BL_7D"'}}')" >/dev/null
+bl="$SNAPSHOT_DIR/${bl_session}.json"
+assert_contains "sidecar is valid JSON with the new fields" "$(jq -e . "$bl" >/dev/null 2>&1 && echo yes || echo no)" "yes"
+assert_contains "names 5h as binding when it trips first" "$(jq -r .binding_limit "$bl")" "five_hour"
+assert_contains "reports both burn rates" "$(jq -r '[.burn_5h_pct_per_hour,.burn_7d_pct_per_day]|map(type)|unique|join(",")' "$bl")" "number"
+assert_contains "not blocked yet" "$(jq -r .blocked_now "$bl")" "false"
+
+# Weekly binding: nearly exhausted weekly, fresh 5h.
+run "$(echo "$BASE" | jq '.session_id="weekly-'"$$"'"
+  | .rate_limits={five_hour:{used_percentage:5,resets_at:'"$BL_5H"'},
+                  seven_day:{used_percentage:97,resets_at:'"$BL_7D"'}}')" >/dev/null
+assert_contains "names 7d as binding when the weekly wall is closer" \
+  "$(jq -r .binding_limit "$SNAPSHOT_DIR/weekly-$$.json")" "seven_day"
+
+# Already capped: blocked_now plus a real reset time to wait for.
+run "$(echo "$BASE" | jq '.session_id="capped-'"$$"'"
+  | .rate_limits={five_hour:{used_percentage:100,resets_at:'"$BL_5H"'},
+                  seven_day:{used_percentage:40,resets_at:'"$BL_7D"'}}')" >/dev/null
+cap="$SNAPSHOT_DIR/capped-$$.json"
+assert_contains "blocked_now true at 100%" "$(jq -r .blocked_now "$cap")" "true"
+assert_contains "blocked_until carries the tripped window reset" "$(jq -r .blocked_until "$cap")" "$BL_5H"
 
 section "Cost"
 out=$(run "$BASE")
@@ -382,6 +450,165 @@ out=$(echo "$budget_payload" | XDG_CACHE_HOME="$cache_home" \
 rm -rf "$cache_home"
 assert_contains "no budget falls back to tokens alone" "$out" "cold 1.2M to reheat"
 assert_not_contains "no invented percentage without a budget" "$out" "% 5h"
+
+section "Measured token throughput"
+# tokens/min comes from the background calibration scan's own sum, cached.
+tok_cache=$(mktemp -d); mkdir -p "$tok_cache/claude-hud"
+tok_run() {
+  echo "$1" > "$tok_cache/claude-hud/calib-tokens"
+  run "$(with_fields '{"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":'"$PAST_RESET"'}}}')" >/dev/null
+  echo "$(with_fields '{"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":'"$PAST_RESET"'}}}')" \
+    | CLAUDE_HUD_CALIB_MIN_PCT=101 XDG_CACHE_HOME="$tok_cache" CLAUDE_HUD_SNAPSHOT_DIR=none \
+      bash statusline.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
+}
+assert_contains "renders millions as M/m" "$(tok_run 1240000)" "1.2M/m"
+assert_contains "renders thousands as k/m" "$(tok_run 579609)" "579k/m"
+assert_contains "renders small counts bare" "$(tok_run 850)" "850/m"
+assert_contains "sits beside the percentage, not instead of it" "$(tok_run 579609)" "%/h"
+
+# Absent or unusable cache must degrade to percentage-only, never print junk.
+rm -f "$tok_cache/claude-hud/calib-tokens"
+out=$(echo "$(with_fields '{"rate_limits":{"five_hour":{"used_percentage":55,"resets_at":'"$PAST_RESET"'}}}')" \
+  | CLAUDE_HUD_CALIB_MIN_PCT=101 XDG_CACHE_HOME="$tok_cache" CLAUDE_HUD_SNAPSHOT_DIR=none \
+    bash statusline.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+assert_matches "still shows the percentage with no token cache" "$out" '[0-9]+(\.[0-9])?%/h'
+assert_not_contains "no stray /m when the cache is missing" "$out" "/m"
+echo "corrupt" > "$tok_cache/claude-hud/calib-tokens"
+assert_not_contains "ignores a corrupt token cache" "$(tok_run corrupt)" "corrupt"
+rm -rf "$tok_cache"
+
+section "Per-model usage (opt-in)"
+# Never hits the network: a fixture cache stands in for the fetch, and the
+# feature is off by default so the rest of the suite never reaches out either.
+api_cache=$(mktemp -d); mkdir -p "$api_cache/claude-hud"
+cat > "$api_cache/claude-hud/usage-api.json" <<'FIXTURE'
+{"five_hour":{"utilization":66},"seven_day":{"utilization":10},
+ "limits":[{"kind":"session","percent":66,"scope":null},
+           {"kind":"weekly_all","percent":10,"scope":null},
+           {"kind":"weekly_scoped","percent":7,"scope":{"model":{"display_name":"Fable"}}}]}
+FIXTURE
+# CLAUDE_HUD_CREDENTIALS points at nothing, so the background fetcher exits
+# before it can reach the network. Without this, any test that ages the cache
+# past the interval fires a real request whose response lands asynchronously and
+# overwrites the fixture -- a race that made these tests flaky, not offline.
+api_run() { echo "$BASE" | XDG_CACHE_HOME="$api_cache" CLAUDE_HUD_CALIB_MIN_PCT=101   CLAUDE_HUD_SNAPSHOT_DIR=none CLAUDE_HUD_CREDENTIALS=/nonexistent "$@" bash statusline.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'; }
+
+assert_contains "on by default -- renders the scoped weekly window" \
+  "$(api_run env CLAUDE_HUD_USAGE_API=1)" "Fable 7%"
+assert_not_contains "CLAUDE_HUD_USAGE_API=0 disables it" "$(api_run env CLAUDE_HUD_USAGE_API=0)" "Fable"
+# Prove the default really is on, without the suite-wide override in the way.
+assert_contains "unset means enabled" \
+  "$(echo "$BASE" | env -u CLAUDE_HUD_USAGE_API XDG_CACHE_HOME="$api_cache" \
+     CLAUDE_HUD_CALIB_MIN_PCT=101 CLAUDE_HUD_SNAPSHOT_DIR=none \
+     CLAUDE_HUD_CREDENTIALS=/nonexistent bash statusline.sh 2>/dev/null \
+     | sed 's/\x1b\[[0-9;]*m//g')" "Fable 7%"
+# Only weekly_scoped rows are models; the aggregate rows must not leak in.
+out=$(api_run env CLAUDE_HUD_USAGE_API=1)
+assert_not_contains "does not render unscoped aggregate rows" "$out" "session"
+assert_not_contains "does not render weekly_all" "$out" "weekly_all"
+
+# Server aggregates render beside the local ones so the two can be compared.
+out=$(api_run env CLAUDE_HUD_USAGE_API=1)
+assert_contains "shows the server's own 5h figure" "$out" "5h 66%"
+assert_contains "shows the server's own 7d figure" "$out" "7d 10%"
+assert_contains "labels the section" "$out" "api "
+# The local numbers must still be there -- this is a comparison, not a swap.
+assert_matches "local 5h bar survives alongside the server figure" "$out" '5h [█░]+ 55%'
+
+# Sampled data must show its age, so a stalled fetch is visible rather than
+# looking like a live value that happens not to move.
+assert_matches "fresh data shows an age in seconds" "$out" 'api .*[0-9]+s'
+touch -d '5 minutes ago' "$api_cache/claude-hud/usage-api.json"
+assert_matches "stale data shows minutes, not a frozen-looking number" \
+  "$(api_run env CLAUDE_HUD_USAGE_API=1)" 'api .*5m'
+touch -d '3 hours ago' "$api_cache/claude-hud/usage-api.json"
+assert_matches "very stale data shows hours" "$(api_run env CLAUDE_HUD_USAGE_API=1)" 'api .*3h'
+touch "$api_cache/claude-hud/usage-api.json"
+
+# CLAUDE_HUD_USAGE_DRIFT hides the aggregates while the two sources agree, and
+# surfaces them the moment they diverge. Per-model rows have no local
+# counterpart, so they show either way.
+# Both windows must be pinned: drift fires if EITHER disagrees, and BASE has no
+# seven_day at all (local 0 vs server 10 is already a 10-point divergence).
+drift_run() { echo "$BASE" | jq '.rate_limits={five_hour:{used_percentage:'"$1"',resets_at:'"$PAST_RESET"'},seven_day:{used_percentage:10,resets_at:'"$WEEK_FUTURE"'}}' \
+  | XDG_CACHE_HOME="$api_cache" CLAUDE_HUD_CALIB_MIN_PCT=101 CLAUDE_HUD_SNAPSHOT_DIR=none \
+    CLAUDE_HUD_CREDENTIALS=/nonexistent CLAUDE_HUD_USAGE_API=1 CLAUDE_HUD_USAGE_DRIFT="$2" \
+    bash statusline.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'; }
+assert_not_contains "drift threshold hides agreeing aggregates" "$(drift_run 66 5)" "5h 66%"
+assert_contains "but keeps the per-model row" "$(drift_run 66 5)" "Fable 7%"
+assert_contains "shows aggregates once they diverge past the threshold" "$(drift_run 40 5)" "5h 66%"
+assert_contains "drift=0 always shows them" "$(drift_run 66 0)" "5h 66%"
+
+# Every failure mode degrades to the ordinary line rather than breaking it.
+echo 'not json at all' > "$api_cache/claude-hud/usage-api.json"
+out=$(api_run env CLAUDE_HUD_USAGE_API=1)
+assert_contains "corrupt cache still renders the status line" "$out" "claude-opus-4-6"
+assert_not_contains "corrupt cache prints no junk segment" "$out" "null"
+echo '{"limits":[]}' > "$api_cache/claude-hud/usage-api.json"
+assert_not_contains "empty limits array adds nothing" "$(api_run env CLAUDE_HUD_USAGE_API=1)" "%|"
+rm -f "$api_cache/claude-hud/usage-api.json"
+assert_contains "missing cache still renders" "$(api_run env CLAUDE_HUD_USAGE_API=1)" "claude-opus-4-6"
+
+# The endpoint 429s intermittently (claude-code#30930). A failed fetch must back
+# off rather than retry on the same cadence, or an occasional refusal becomes a
+# sustained one. Tested offline by seeding the backoff file directly.
+echo '{"five_hour":{"utilization":66},"seven_day":{"utilization":10},"limits":[]}' \
+  > "$api_cache/claude-hud/usage-api.json"
+touch -d '1 hour ago' "$api_cache/claude-hud/usage-api.json"
+printf '%s 3\n' "$(( $(date +%s) + 600 ))" > "$api_cache/claude-hud/usage-api.backoff"
+api_run env CLAUDE_HUD_USAGE_API=1 >/dev/null; sleep 1
+assert_contains "an active backoff suppresses the fetch" \
+  "$([ -d "$api_cache/claude-hud/usage-api.lock" ] && echo fetched || echo held)" "held"
+assert_contains "backoff state is left alone while holding" \
+  "$(cut -d' ' -f2 "$api_cache/claude-hud/usage-api.backoff")" "3"
+
+# An expired backoff must not block forever.
+printf '%s 3\n' "$(( $(date +%s) - 10 ))" > "$api_cache/claude-hud/usage-api.backoff"
+api_run env CLAUDE_HUD_USAGE_API=1 >/dev/null; sleep 1
+assert_not_contains "an expired backoff no longer holds" \
+  "$(cut -d' ' -f1 "$api_cache/claude-hud/usage-api.backoff" 2>/dev/null || echo gone)" "$(( $(date +%s) - 10 ))"
+rm -f "$api_cache/claude-hud/usage-api.backoff"
+
+# Serving a stale cache during a backoff is the point: the line keeps its last
+# known numbers with an honest age rather than losing the segment.
+printf '%s 2\n' "$(( $(date +%s) + 600 ))" > "$api_cache/claude-hud/usage-api.backoff"
+echo '{"five_hour":{"utilization":66},"seven_day":{"utilization":10},"limits":[{"kind":"weekly_scoped","percent":7,"scope":{"model":{"display_name":"Fable"}}}]}' \
+  > "$api_cache/claude-hud/usage-api.json"
+touch -d '1 hour ago' "$api_cache/claude-hud/usage-api.json"
+out=$(api_run env CLAUDE_HUD_USAGE_API=1)
+assert_contains "stale data still renders while backing off" "$out" "Fable 7%"
+assert_matches "and shows its real age" "$out" 'api .*1h'
+rm -f "$api_cache/claude-hud/usage-api.backoff"
+touch "$api_cache/claude-hud/usage-api.json"
+
+# A stale lock from a crashed fetch must not wedge it forever.
+mkdir -p "$api_cache/claude-hud/usage-api.lock"
+touch -d '10 minutes ago' "$api_cache/claude-hud/usage-api.lock"
+api_run env CLAUDE_HUD_USAGE_API=1 >/dev/null
+sleep 1
+assert_contains "clears a lock older than 2 minutes" \
+  "$([ -d "$api_cache/claude-hud/usage-api.lock" ] && echo held || echo cleared)" "cleared"
+rm -rf "$api_cache"
+
+section "Model pricing"
+# Reheat cost must scale with the model's real input price: Fable $10 > Opus $5
+# > Sonnet $2 > Haiku $1 per MTok. Fable used to fall through to the Sonnet arm
+# and be priced 5x under.
+price_pct() {
+  local d=$(mktemp -d)
+  echo "$BASE" | jq '.model.display_name="'"$1"'"
+    | .context_window={used_percentage:50,total_input_tokens:4000000}
+    | .prompt_cache={caching_observed:true,warm:false,ttl:"1h"}' \
+    | CLAUDE_HUD_CALIB_MIN_PCT=101 CLAUDE_HUD_WINDOW_CENTS=48000 XDG_CACHE_HOME="$d" \
+      CLAUDE_HUD_SNAPSHOT_DIR=none bash statusline.sh 2>/dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -oE 'cold [0-9.]+M ([0-9]+)%' | grep -oE '[0-9]+%$' | tr -d '%'
+  rm -rf "$d"
+}
+f=$(price_pct "Fable 5.1"); o=$(price_pct "Opus 5"); s=$(price_pct "Sonnet 5"); h=$(price_pct "Haiku 4.5")
+assert_contains "Fable priced above Opus" "$([ "${f:-0}" -gt "${o:-0}" ] && echo yes || echo "no (fable=$f opus=$o)")" "yes"
+assert_contains "Opus priced above Sonnet" "$([ "${o:-0}" -gt "${s:-0}" ] && echo yes || echo "no (opus=$o sonnet=$s)")" "yes"
+assert_contains "Sonnet priced above Haiku" "$([ "${s:-0}" -gt "${h:-0}" ] && echo yes || echo "no (sonnet=$s haiku=$h)")" "yes"
+assert_contains "Fable is 5x Sonnet, not equal to it" "$([ "${f:-0}" -ge $(( ${s:-0} * 4 )) ] && echo yes || echo "no (fable=$f sonnet=$s)")" "yes"
 
 section "Self-calibrated window"
 
