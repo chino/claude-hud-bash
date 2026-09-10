@@ -94,6 +94,13 @@ with_fields() {
 # that need a calibration value seed the cache file directly instead.
 export CLAUDE_HUD_CALIB_MIN_PCT=101
 
+# The per-model usage fetch is on by default, so without this the whole suite
+# makes live authenticated API calls and renders whatever the account happens to
+# be at -- which collides with fixtures (a real "7d 56%" breaks the weekly-window
+# tests) and makes results depend on the network. The section that tests this
+# feature re-enables it explicitly against a fixture cache.
+export CLAUDE_HUD_USAGE_API=0
+
 # Snapshots go to a scratch dir so the suite never writes to the real cache.
 SNAPSHOT_DIR=$(mktemp -d)
 export CLAUDE_HUD_SNAPSHOT_DIR="$SNAPSHOT_DIR"
@@ -486,8 +493,15 @@ FIXTURE
 # overwrites the fixture -- a race that made these tests flaky, not offline.
 api_run() { echo "$BASE" | XDG_CACHE_HOME="$api_cache" CLAUDE_HUD_CALIB_MIN_PCT=101   CLAUDE_HUD_SNAPSHOT_DIR=none CLAUDE_HUD_CREDENTIALS=/nonexistent "$@" bash statusline.sh 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'; }
 
-assert_not_contains "off by default -- no per-model segment" "$(api_run)" "Fable"
-assert_contains "enabled -- renders the scoped weekly window" "$(api_run env CLAUDE_HUD_USAGE_API=1)" "Fable 7%"
+assert_contains "on by default -- renders the scoped weekly window" \
+  "$(api_run env CLAUDE_HUD_USAGE_API=1)" "Fable 7%"
+assert_not_contains "CLAUDE_HUD_USAGE_API=0 disables it" "$(api_run env CLAUDE_HUD_USAGE_API=0)" "Fable"
+# Prove the default really is on, without the suite-wide override in the way.
+assert_contains "unset means enabled" \
+  "$(echo "$BASE" | env -u CLAUDE_HUD_USAGE_API XDG_CACHE_HOME="$api_cache" \
+     CLAUDE_HUD_CALIB_MIN_PCT=101 CLAUDE_HUD_SNAPSHOT_DIR=none \
+     CLAUDE_HUD_CREDENTIALS=/nonexistent bash statusline.sh 2>/dev/null \
+     | sed 's/\x1b\[[0-9;]*m//g')" "Fable 7%"
 # Only weekly_scoped rows are models; the aggregate rows must not leak in.
 out=$(api_run env CLAUDE_HUD_USAGE_API=1)
 assert_not_contains "does not render unscoped aggregate rows" "$out" "session"

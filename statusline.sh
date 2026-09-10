@@ -326,13 +326,15 @@ fi
 # the aggregate numbers match to the percentage point, so this adds the
 # per-model breakdown and nothing else.
 #
-# Off by default (CLAUDE_HUD_USAGE_API=1 to enable). It is an undocumented
+# On by default; CLAUDE_HUD_USAGE_API=0 disables it. It is an undocumented
 # internal endpoint that a release can reshape without notice, it sends your
-# OAuth token, and it is subject to an open 429 bug that depends on the exact
-# User-Agent. Nothing here is load-bearing: every failure path leaves the line
-# exactly as it would have been.
+# OAuth token to Anthropic (the same token and the same endpoint Claude Code
+# itself uses), and it is subject to an open 429 bug that depends on the exact
+# User-Agent -- so it is worth being able to turn off. Nothing here is
+# load-bearing: every failure path leaves the line exactly as it would have
+# been, and the payload-derived numbers never depend on it.
 usage_models=""
-if [[ ${CLAUDE_HUD_USAGE_API:-0} == 1 ]]; then
+if [[ ${CLAUDE_HUD_USAGE_API:-1} != 0 ]]; then
   usage_cache="$CACHE_DIR/usage-api.json"
   usage_lock="$CACHE_DIR/usage-api.lock"
   # The fetch is backgrounded and never blocks a render, and the lock means one

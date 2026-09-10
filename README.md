@@ -146,7 +146,7 @@ The status line wraps across as many lines as needed to fit `COLUMNS` (passed in
 
 Claude Code only re-runs the script on specific triggers: a new assistant message, `/compact` finishing, a permission-mode change, a vim-mode toggle, a warm prompt cache reaching its `expires_at` (so the cache segment above flips to cold right on schedule, even mid-tool-call), the 5-hour rate-limit window hitting its own `resets_at`, or the `refreshInterval` timer if you've set one. **Terminal resize is not one of them** — if you resize the window or a pane, the status line keeps rendering at the old width until the next trigger fires. This is a known upstream gap, not a bug in this script: [anthropics/claude-code#76988](https://github.com/anthropics/claude-code/issues/76988). Setting `refreshInterval` (see [Install](#install)) bounds how long a resize stays stale, at the cost of a script run every N seconds.
 
-## Per-model usage (opt-in, off by default)
+## Per-model usage
 
 The statusline payload carries only aggregate `five_hour` / `seven_day`
 windows — [#52661](https://github.com/anthropics/claude-code/issues/52661),
@@ -154,11 +154,13 @@ asking for per-model windows in the payload, was closed as *not planned*.
 
 `GET /api/oauth/usage` returns them in its `limits[]` array. Enable with:
 
+On by default:
+
 ```bash
-CLAUDE_HUD_USAGE_API=1      # off by default
+CLAUDE_HUD_USAGE_API=0         # disable it entirely
 CLAUDE_HUD_USAGE_INTERVAL=30   # seconds between fetches (default 30)
-CLAUDE_HUD_USAGE_DRIFT=0    # hide the server aggregates unless they disagree
-                            # with the payload by N points (0 = always show)
+CLAUDE_HUD_USAGE_DRIFT=0       # hide the server aggregates unless they disagree
+                               # with the payload by N points (0 = always show)
 ```
 
 ```
@@ -191,10 +193,11 @@ server numbers visibly frozen against the ticking local ones.
 cache, so a failed, missing, stale, corrupt, or never-fetched response produces
 no segment and changes nothing else on the line.
 
-**Why it's off by default:** it is an undocumented internal endpoint that a
-release can reshape without notice, it sends your OAuth token, and it is
-subject to an [open 429 bug](https://github.com/anthropics/claude-code/issues/30930)
-that depends on the exact `User-Agent`.
+**Why you might turn it off:** it is an undocumented internal endpoint that a
+release can reshape without notice, it sends your OAuth token to Anthropic (the
+same token and the same endpoint Claude Code itself uses), and it is subject to
+an [open 429 bug](https://github.com/anthropics/claude-code/issues/30930) that
+depends on the exact `User-Agent`. `CLAUDE_HUD_USAGE_API=0` disables it.
 
 **It does not replace the payload.** Checked side by side, the aggregates agree
 to the percentage point (66% vs 65%, entirely explained by a 4-second snapshot
