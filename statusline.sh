@@ -342,10 +342,23 @@ if [[ ${CLAUDE_HUD_USAGE_API:-1} != 0 ]]; then
   # buys request volume, nothing else. Kept close to the render cadence on
   # purpose: a long interval leaves the server numbers visibly frozen while the
   # local ones tick, which reads like a bug rather than a slower sample.
-  usage_interval=${CLAUDE_HUD_USAGE_INTERVAL:-30}
+  usage_interval=${CLAUDE_HUD_USAGE_INTERVAL:-60}
+
+  usage_backoff="$CACHE_DIR/usage-api.backoff"
 
   usage_age=$usage_interval
   [[ -f $usage_cache ]] && usage_age=$(( now - $(date -r "$usage_cache" +%s 2>/dev/null || echo 0) ))
+
+  # This endpoint returns 429 intermittently (anthropics/claude-code#30930).
+  # Retrying into that on a fixed cadence is what turns an occasional refusal
+  # into a sustained one, so a failed fetch backs off exponentially and a
+  # successful one clears the backoff. Rendering is unaffected either way --
+  # the line just shows an older sample, with its age.
+  usage_hold=0
+  if [[ -f $usage_backoff ]]; then
+    read -r usage_until _ < "$usage_backoff" 2>/dev/null
+    [[ $usage_until =~ ^[0-9]+$ ]] && (( now < usage_until )) && usage_hold=1
+  fi
 
   # A crashed fetch would otherwise hold the lock forever.
   if [[ -d $usage_lock ]]; then
@@ -354,19 +367,29 @@ if [[ ${CLAUDE_HUD_USAGE_API:-1} != 0 ]]; then
   fi
 
   # mkdir is atomic, so exactly one of several concurrent sessions fetches.
-  if (( usage_age >= usage_interval )) && mkdir -p "$CACHE_DIR" 2>/dev/null \
-     && mkdir "$usage_lock" 2>/dev/null; then
+  if (( usage_hold == 0 )) && (( usage_age >= usage_interval )) \
+     && mkdir -p "$CACHE_DIR" 2>/dev/null && mkdir "$usage_lock" 2>/dev/null; then
     (
       trap 'rmdir "$usage_lock" 2>/dev/null' EXIT
       tok=$(jq -r '.claudeAiOauth.accessToken // empty' \
         "${CLAUDE_HUD_CREDENTIALS:-$HOME/.claude/.credentials.json}" 2>/dev/null)
       [[ -n $tok ]] || exit 0
-      curl -sf --max-time 10 \
-        -H "Authorization: Bearer $tok" \
-        -H "User-Agent: claude-cli/${cc_version:-2.0.0} (external, cli)" \
-        -H "anthropic-beta: oauth-2025-04-20" \
-        https://api.anthropic.com/api/oauth/usage > "$usage_cache.tmp" 2>/dev/null \
-        && mv -f "$usage_cache.tmp" "$usage_cache" 2>/dev/null
+      if curl -sf --max-time 10 \
+           -H "Authorization: Bearer $tok" \
+           -H "User-Agent: claude-cli/${cc_version:-2.0.0} (external, cli)" \
+           -H "anthropic-beta: oauth-2025-04-20" \
+           https://api.anthropic.com/api/oauth/usage > "$usage_cache.tmp" 2>/dev/null \
+         && [[ -s "$usage_cache.tmp" ]]; then
+        mv -f "$usage_cache.tmp" "$usage_cache" 2>/dev/null
+        rm -f "$usage_backoff" 2>/dev/null
+      else
+        fails=0
+        [[ -f $usage_backoff ]] && read -r _ fails < "$usage_backoff" 2>/dev/null
+        [[ $fails =~ ^[0-9]+$ ]] || fails=0
+        fails=$(( fails + 1 )); (( fails > 6 )) && fails=6
+        printf '%s %s\n' "$(( now + usage_interval * (1 << fails) ))" "$fails" \
+          > "$usage_backoff" 2>/dev/null
+      fi
       rm -f "$usage_cache.tmp" 2>/dev/null
     ) >/dev/null 2>&1 &
     disown 2>/dev/null

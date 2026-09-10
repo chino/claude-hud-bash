@@ -549,6 +549,38 @@ assert_not_contains "empty limits array adds nothing" "$(api_run env CLAUDE_HUD_
 rm -f "$api_cache/claude-hud/usage-api.json"
 assert_contains "missing cache still renders" "$(api_run env CLAUDE_HUD_USAGE_API=1)" "claude-opus-4-6"
 
+# The endpoint 429s intermittently (claude-code#30930). A failed fetch must back
+# off rather than retry on the same cadence, or an occasional refusal becomes a
+# sustained one. Tested offline by seeding the backoff file directly.
+echo '{"five_hour":{"utilization":66},"seven_day":{"utilization":10},"limits":[]}' \
+  > "$api_cache/claude-hud/usage-api.json"
+touch -d '1 hour ago' "$api_cache/claude-hud/usage-api.json"
+printf '%s 3\n' "$(( $(date +%s) + 600 ))" > "$api_cache/claude-hud/usage-api.backoff"
+api_run env CLAUDE_HUD_USAGE_API=1 >/dev/null; sleep 1
+assert_contains "an active backoff suppresses the fetch" \
+  "$([ -d "$api_cache/claude-hud/usage-api.lock" ] && echo fetched || echo held)" "held"
+assert_contains "backoff state is left alone while holding" \
+  "$(cut -d' ' -f2 "$api_cache/claude-hud/usage-api.backoff")" "3"
+
+# An expired backoff must not block forever.
+printf '%s 3\n' "$(( $(date +%s) - 10 ))" > "$api_cache/claude-hud/usage-api.backoff"
+api_run env CLAUDE_HUD_USAGE_API=1 >/dev/null; sleep 1
+assert_not_contains "an expired backoff no longer holds" \
+  "$(cut -d' ' -f1 "$api_cache/claude-hud/usage-api.backoff" 2>/dev/null || echo gone)" "$(( $(date +%s) - 10 ))"
+rm -f "$api_cache/claude-hud/usage-api.backoff"
+
+# Serving a stale cache during a backoff is the point: the line keeps its last
+# known numbers with an honest age rather than losing the segment.
+printf '%s 2\n' "$(( $(date +%s) + 600 ))" > "$api_cache/claude-hud/usage-api.backoff"
+echo '{"five_hour":{"utilization":66},"seven_day":{"utilization":10},"limits":[{"kind":"weekly_scoped","percent":7,"scope":{"model":{"display_name":"Fable"}}}]}' \
+  > "$api_cache/claude-hud/usage-api.json"
+touch -d '1 hour ago' "$api_cache/claude-hud/usage-api.json"
+out=$(api_run env CLAUDE_HUD_USAGE_API=1)
+assert_contains "stale data still renders while backing off" "$out" "Fable 7%"
+assert_matches "and shows its real age" "$out" 'api .*1h'
+rm -f "$api_cache/claude-hud/usage-api.backoff"
+touch "$api_cache/claude-hud/usage-api.json"
+
 # A stale lock from a crashed fetch must not wedge it forever.
 mkdir -p "$api_cache/claude-hud/usage-api.lock"
 touch -d '10 minutes ago' "$api_cache/claude-hud/usage-api.lock"
