@@ -158,7 +158,7 @@ On by default:
 
 ```bash
 CLAUDE_HUD_USAGE_API=0         # disable it entirely
-CLAUDE_HUD_USAGE_INTERVAL=30   # seconds between fetches (default 30)
+CLAUDE_HUD_USAGE_INTERVAL=60   # seconds between fetches (default 60)
 CLAUDE_HUD_USAGE_DRIFT=0       # hide the server aggregates unless they disagree
                                # with the payload by N points (0 = always show)
 ```
@@ -198,6 +198,12 @@ release can reshape without notice, it sends your OAuth token to Anthropic (the
 same token and the same endpoint Claude Code itself uses), and it is subject to
 an [open 429 bug](https://github.com/anthropics/claude-code/issues/30930) that
 depends on the exact `User-Agent`. `CLAUDE_HUD_USAGE_API=0` disables it.
+
+That 429 is intermittent in practice, so a failed fetch **backs off
+exponentially** (interval × 2ⁿ, capped at 64×) and a successful one clears the
+backoff. Retrying into a refusal on a fixed cadence is what turns an occasional
+429 into a sustained one. While backing off, the line keeps showing the last
+successful sample with its real age — you lose freshness, not the segment.
 
 **It does not replace the payload.** Checked side by side, the aggregates agree
 to the percentage point (66% vs 65%, entirely explained by a 4-second snapshot
