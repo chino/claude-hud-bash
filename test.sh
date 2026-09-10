@@ -92,6 +92,13 @@ with_fields() {
 # ~/.claude/projects transcripts and overwrites the calibration cache. Disable
 # it for the whole suite by putting the sampling floor out of reach; the tests
 # that need a calibration value seed the cache file directly instead.
+# The suite exercises plan detection, budget fallbacks and the reheat maths, so
+# it must not inherit a user's own overrides -- with CLAUDE_HUD_WINDOW_CENTS set
+# in ~/.claude/settings.json (a perfectly reasonable thing to do), nine tests
+# fail against a value the suite never chose.
+unset CLAUDE_HUD_WINDOW_CENTS CLAUDE_HUD_TOKEN_BUDGET CLAUDE_HUD_SNAPSHOT_DIR
+unset CLAUDE_HUD_USAGE_INTERVAL CLAUDE_HUD_USAGE_DRIFT CLAUDE_HUD_CREDENTIALS
+
 export CLAUDE_HUD_CALIB_MIN_PCT=101
 
 # The per-model usage fetch is on by default, so without this the whole suite
