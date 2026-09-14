@@ -161,17 +161,24 @@ weekly() {
                 "seven_day":{"used_percentage":'"$1"',"resets_at":'"${2:-$WEEK_FUTURE}"'}}}'
 }
 
-# Hidden by default — BASE carries no seven_day window at all.
+# Before the first API response there is no rate_limits block at all. The 5h bar
+# renders an empty placeholder in that state; the weekly does the same rather
+# than appearing a beat later than its neighbour.
 out=$(run "$BASE")
-assert_not_contains "hidden when there is no weekly window" "$out" "7d "
+assert_contains "placeholder when the payload has no rate limits yet" "$out" "7d "
+assert_matches "placeholder weekly is empty, with no reset label" "$out" '7d ░+ 0%'
 
-# Hidden below the threshold, shown at it. Default WEEKLY_SHOW_AT_REMAINING=80
-# means it appears from 20% used onward.
-out=$(run "$(weekly 19)")
-assert_not_contains "hidden below the threshold" "$out" "7d "
+# Shown from the first percent of the week onward -- the segment's position on
+# the line should not depend on how much of the window is gone.
+out=$(run "$(weekly 3)")
+assert_contains "shown well below the old 20% threshold" "$out" "7d "
+assert_contains "shows a barely-used weekly percentage" "$out" "3%"
+
+# 0% used is still a window, as long as the payload reported one.
+out=$(run "$(weekly 0)")
+assert_contains "shown at 0% when the window exists" "$out" "7d "
 
 out=$(run "$(weekly 20)")
-assert_contains "shown at the threshold" "$out" "7d "
 assert_contains "shows weekly percentage" "$out" "20%"
 
 out=$(run "$(weekly 93)")
@@ -191,9 +198,20 @@ assert_matches "shows clock time when resetting today" "$out" '7d [^│]*[0-9]+:
 out=$(run "$(weekly 64 "\"$(date -Iseconds -d "@$WEEK_FUTURE")\"")")
 assert_contains "handles ISO 8601 resets_at" "$out" "64%"
 
-# Threshold is tunable from the environment.
-out=$(WEEKLY_SHOW_AT_REMAINING=100 bash -c 'echo "$1" | bash statusline.sh' _ "$(weekly 3)" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
-assert_contains "WEEKLY_SHOW_AT_REMAINING=100 always shows it" "$out" "7d "
+# Threshold is still tunable from the environment, for anyone who wants the
+# space back early in the week.
+weekly_at() {
+  WEEKLY_SHOW_AT_REMAINING="$1" bash -c 'echo "$2" | bash statusline.sh' _ "$1" "$2" 2>/dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g'
+}
+out=$(weekly_at 80 "$(weekly 19)")
+assert_not_contains "WEEKLY_SHOW_AT_REMAINING=80 hides it below 20%" "$out" "7d "
+
+out=$(weekly_at 80 "$(weekly 20)")
+assert_contains "WEEKLY_SHOW_AT_REMAINING=80 shows it at 20%" "$out" "7d "
+
+out=$(weekly_at 0 "$(weekly 93)")
+assert_not_contains "WEEKLY_SHOW_AT_REMAINING=0 holds it back until exhausted" "$out" "7d "
 
 section "Burn rate & time-to-cap"
 # resets_at 1h in past = window 4h elapsed, 55% used → should show burn rate
@@ -240,7 +258,8 @@ assert_not_contains "never renders a bare 0d duration" "$out" "~0d"
 assert_matches "sub-day weekly cap reads in hours or minutes" "$out" '7d [^|]*~[0-9]+[hm]'
 
 # Hidden with the segment it belongs to, not on its own rule.
-out=$(run "$(w7 5 "$SEVEN_MID")")
+out=$(WEEKLY_SHOW_AT_REMAINING=80 bash -c 'echo "$1" | bash statusline.sh' _ "$(w7 5 "$SEVEN_MID")" 2>/dev/null \
+  | sed 's/\x1b\[[0-9;]*m//g')
 assert_not_contains "no weekly burn when the 7d segment is hidden" "$out" "%/d"
 
 section "Binding limit (sidecar)"

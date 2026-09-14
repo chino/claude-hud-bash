@@ -10,9 +10,9 @@ A simple low-dependency bash implementation inspired by [claude-hud](https://git
 | **Project** | `my-project git:(main*↑2↓1)` | Current directory name and git branch. `*` means uncommitted changes; `↑N`/`↓N` show commits ahead/behind the upstream (only when tracking a remote and diverged). On detached HEAD, falls back to an exact tag match, then a short commit SHA, instead of showing nothing |
 | **Context** | `ctx ████░░░░░░ 23%` | Context window usage. Turns yellow at 70%, red at 85% |
 | **Prompt cache** | `warm ~54m hit 87%` / `cold 829.5k 2-3% 5h` | Whether the main conversation's prompt cache is warm or cold, from `prompt_cache.warm`. Green while warm, shifting to yellow inside the last 20% of the TTL, red once cold. **Warm**: a countdown to `expires_at`, plus `hit N%` — the cache hit ratio. **Cold**: the tokens the next turn re-writes into the cache, then what that costs as a share of your 5-hour window under two independent estimates (see [Cold reheat cost](#cold-reheat-cost) and [docs/cold-reheat.md](docs/cold-reheat.md)); the hit ratio is dropped here since it's a backward-looking stat, not something that changes what the next turn costs. Hidden until the first API response of the session, since `prompt_cache` isn't in the payload before then |
-| **5h usage** | `5h ██░░░░░░░░ 22% 7pm` | Rolling 5-hour rate limit consumption + estimated reset time. Turns magenta at 75%, red at 90% |
-| **7d usage** | `7d ████░░░░░░ 41% sat 🔥 6%/d ~4d2h` | Rolling 7-day rate limit consumption, reset, and burn rate + time-to-cap in days. Hidden until it is worth the space — see [Weekly window](#weekly-window). Cyan by default, yellow at 75%, red at 90% |
-| **Burn rate** | `🔥 12%/h 579k/m ~1h20m` | Percent of the 5h window consumed per hour, measured token throughput, and estimated time to the cap. The token figure is real measured throughput from the calibration scan (local machine only) — dim, because it is a sampled estimate rather than a live number |
+| **5h usage** | `5h ██░░░░░░░░ 22% 7pm 🔥 12%/h 579k/m ~1h20m` | Rolling 5-hour rate limit consumption, estimated reset time, and burn rate + time-to-cap in hours. Turns magenta at 75%, red at 90% |
+| **7d usage** | `7d ████░░░░░░ 41% sat 🔥 6%/d ~4d2h` | Rolling 7-day rate limit consumption, reset, and burn rate + time-to-cap in days — see [Weekly window](#weekly-window). Cyan by default, yellow at 75%, red at 90% |
+| **Burn rate** | `🔥 12%/h 579k/m ~1h20m` | Rides inside the window it describes — `%/h` in the 5h segment, `%/d` in the 7d one. Percent of that window consumed per unit time, measured token throughput (5h only), and estimated time to the cap. The token figure is real measured throughput from the calibration scan (local machine only) — dim, because it is a sampled estimate rather than a live number |
 | **Env** | `🔌2 🪝3` | Count of MCP servers (🔌) and hooks (🪝). Only shown when non-zero |
 | **Cost** | `$0.04` | Total API cost for the current session |
 | **Duration** | `⏱️ 5m` | How long the current Claude Code session has been running |
@@ -28,9 +28,11 @@ The reset clock time (`7pm`) next to the 5h bar comes from `resets_at` in the Cl
 ### Weekly window
 
 The `7d` segment sits immediately right of the 5h one and reads
-`rate_limits.seven_day` from the statusline data. It is **hidden until remaining
-drops to 80%** — i.e. from 20% used onward — so it costs nothing on the status
-line early in the week and appears once it is worth watching.
+`rate_limits.seven_day` from the statusline data. It is **always shown**, from
+0% used onward, exactly like the 5h bar beside it. It used to stay hidden until
+20%, to save the space early in the week; that trade is a bad one, because a
+segment that is only sometimes present is one you end up hunting for, and the
+eye can't learn a position that moves.
 
 Its reset label is the weekday (`sat`) while the reset is more than 24h out, and
 switches to a clock time (`9:15pm`) on the day itself.
@@ -39,7 +41,7 @@ Two knobs, both overridable from the environment:
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `WEEKLY_SHOW_AT_REMAINING` | `80` | Show the segment once remaining is at or below this percent. `100` always shows it, `0` holds it back until the window is fully consumed |
+| `WEEKLY_SHOW_AT_REMAINING` | `100` | Show the segment once remaining is at or below this percent. The default always shows it; `80` restores the old behaviour of waiting until 20% used, `0` holds it back until the window is fully consumed |
 | `WEEKLY_BAR_WIDTH` | `10` | Bar width in cells, matching the other bars |
 
 The colour ramp is deliberately a different hue from the 5h bar's blue/magenta
@@ -58,8 +60,9 @@ mins_to_cap  = (100 - used_percentage) * elapsed_secs / (used_percentage * 60)
 Burn reads as a share of the window per unit time — `🔥 12%/h` for the 5h
 window, `🔥 6%/d` for the weekly — kept to one decimal below 10 so a slow burn
 doesn't floor to `0`. Because the maths needs only a percentage and a reset
-time, **both windows use it**; the weekly burn rides inside the 7d segment so
-it appears and disappears with the bar it describes.
+time, **both windows use it**. Each burn rides inside its own segment — the
+hourly rate in the 5h bar, the daily in the 7d one — so it appears and
+disappears with the bar it describes.
 
 Time-to-cap is written as time, never a fraction of a day: `45m`, `3h20m`,
 `2d4h`. Urgency colours are per-window — the 5h is red under 1h and yellow
@@ -164,12 +167,12 @@ CLAUDE_HUD_USAGE_DRIFT=0       # hide the server aggregates unless they disagree
 ```
 
 ```
-… │ 🔥 22%/h 579k/m ~1h31m │ Fable 7% │ ram 34% …
+… │ 5h ██████░░░░ 65% 4:09am 🔥 22%/h 579k/m ~1h31m │ Fable 7% │ ram 34% …
 ```
 
 ```
-… │ 5h ██████░░░░ 65% 4:09am │ 🔥 22%/h 579k/m ~1h31m │ api 5h 66% 7d 10% Fable 7% 8s │ …
-      ^ local, from the payload                          ^ server, sampled
+… │ 5h ██████░░░░ 65% 4:09am 🔥 22%/h 579k/m ~1h31m │ api 5h 66% 7d 10% Fable 7% 8s │ …
+      ^ local, from the payload                        ^ server, sampled
 ```
 
 The server's own aggregates render beside the local ones so the two can be

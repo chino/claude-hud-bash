@@ -14,10 +14,16 @@ BRIGHT_BLUE=$'\e[94m'
 BRIGHT_MAGENTA=$'\e[95m'
 BRIGHT_CYAN=$'\e[96m'
 
-# Weekly (7-day) window: hidden until it is worth the space. Shown once
-# remaining drops to WEEKLY_SHOW_AT_REMAINING percent or less — i.e. at the
-# default of 80, from 20% used onward. Set to 100 to always show it.
-WEEKLY_SHOW_AT_REMAINING=${WEEKLY_SHOW_AT_REMAINING:-80}
+# Weekly (7-day) window: always shown, exactly like the 5h one beside it. It
+# used to stay hidden until 20% used, which saved a little space early in the
+# week and cost more than it saved -- a segment that is sometimes there is one
+# you have to hunt for, and the eye cannot learn a position that moves. Before
+# the session's first API response the payload carries no rate_limits at all and
+# both bars render an empty placeholder; that is the 5h bar's long-standing
+# behaviour and the weekly now matches it rather than arriving a beat later.
+# Lower WEEKLY_SHOW_AT_REMAINING to hold it back below a given remaining
+# percentage.
+WEEKLY_SHOW_AT_REMAINING=${WEEKLY_SHOW_AT_REMAINING:-100}
 WEEKLY_BAR_WIDTH=${WEEKLY_BAR_WIDTH:-10}
 
 # Every field comes out of ONE jq call. This used to be sixteen separate
@@ -150,7 +156,6 @@ else duration="$(( duration_ms / 1000 ))s"; fi
 
 # ── Burn rate & time-to-cap ───────────────────────────────────────────────────
 burn_label=""
-ttc_label=""
 now=$(date +%s)
 
 # Compact duration: "45m", "3h20m", "2d4h". A bare "0.4d" is unreadable when
@@ -207,19 +212,21 @@ elif (( calib_tpm > 0 )); then
   tok_label=" ${DIM}${calib_tpm}/m${RESET}"
 fi
 
+# Like the weekly burn below, this rides inside the segment it describes -- the
+# 5h bar -- rather than standing alone somewhere further along the line.
 if (( burn_5h_x10 > 0 )); then
-  burn_label="🔥 ${YELLOW}$(fmt_burn "$burn_5h_x10" h)${RESET}${tok_label}"
+  burn_label=" 🔥 ${YELLOW}$(fmt_burn "$burn_5h_x10" h)${RESET}${tok_label}"
   if (( ttc_5h > 0 )); then
     if   (( ttc_5h < 60 ));  then ttc_color=$RED
     elif (( ttc_5h < 120 )); then ttc_color=$YELLOW
     else                          ttc_color=$DIM; fi
-    ttc_label=" ${ttc_color}~$(fmt_dur "$ttc_5h")${RESET}"
+    burn_label+=" ${ttc_color}~$(fmt_dur "$ttc_5h")${RESET}"
   fi
 fi
 
-# The weekly burn rides along with the 7d segment rather than standing alone,
-# so it appears and disappears with the bar it describes instead of needing its
-# own visibility rule. Thresholds are in days, not hours: a weekly window with
+# The weekly burn rides along with the 7d segment the same way, so it appears
+# and disappears with the bar it describes instead of needing its own
+# visibility rule. Thresholds are in days, not hours: a weekly window with
 # two hours left is far more urgent than a 5h window in the same state.
 burn_7d_label=""
 if (( burn_7d_x10 > 0 )); then
@@ -695,10 +702,9 @@ fi
 
 segments+=("${DIM}ctx${RESET} ${ctx_bar} ${CTX_COLOR}${ctx}%${RESET}")
 [[ -n $cache_label ]] && segments+=("$cache_label")
-segments+=("${DIM}5h${RESET} ${usage_bar} ${USAGE_COLOR}${usage_5h}%${reset_label}${RESET}")
+segments+=("${DIM}5h${RESET} ${usage_bar} ${USAGE_COLOR}${usage_5h}%${reset_label}${RESET}${burn_label}")
 (( usage_7d >= 100 - WEEKLY_SHOW_AT_REMAINING )) && \
   segments+=("${DIM}7d${RESET} ${weekly_bar} ${WEEKLY_COLOR}${usage_7d}%${weekly_reset_label}${RESET}${burn_7d_label}")
-[[ -n $burn_label ]] && segments+=("${burn_label}${ttc_label}")
 
 env=""
 (( mcps > 0 ))       && env+=" 🔌${mcps}"
