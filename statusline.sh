@@ -380,9 +380,20 @@ if [[ ${CLAUDE_HUD_USAGE_API:-1} != 0 ]]; then
       trap 'rmdir "$usage_lock" 2>/dev/null' EXIT
       tok=$(jq -r '.claudeAiOauth.accessToken // empty' \
         "${CLAUDE_HUD_CREDENTIALS:-$HOME/.claude/.credentials.json}" 2>/dev/null)
-      [[ -n $tok ]] || exit 0
-      if curl -sf --max-time 10 \
-           -H "Authorization: Bearer $tok" \
+      # Refuse anything outside the OAuth token alphabet, empty included. A
+      # quoted curl config value processes backslash escapes, and a newline in
+      # the value would be read as a further config line -- so a mangled or
+      # hostile credentials file must not reach the parser at all.
+      [[ $tok =~ ^[A-Za-z0-9._~+/=-]+$ ]] || exit 0
+      # The token goes in on stdin, not in argv: anything on a command line is
+      # readable from the process table by any user on the machine for as long
+      # as the request is in flight. printf is a builtin and the pipe never
+      # touches disk, so the token exists only in this subshell and curl's
+      # memory. The other two headers are not secret and stay where they read
+      # more clearly. Note the quotes: curl's `header = value` form does not
+      # carry a value containing a colon, and drops the header silently.
+      if printf 'header "Authorization: Bearer %s"\n' "$tok" \
+         | curl -sf --max-time 10 --config - \
            -H "User-Agent: claude-cli/${cc_version:-2.0.0} (external, cli)" \
            -H "anthropic-beta: oauth-2025-04-20" \
            https://api.anthropic.com/api/oauth/usage > "$usage_cache.tmp" 2>/dev/null \

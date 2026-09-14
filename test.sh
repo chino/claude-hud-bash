@@ -636,6 +636,49 @@ assert_contains "Opus priced above Sonnet" "$([ "${o:-0}" -gt "${s:-0}" ] && ech
 assert_contains "Sonnet priced above Haiku" "$([ "${s:-0}" -gt "${h:-0}" ] && echo yes || echo "no (sonnet=$s haiku=$h)")" "yes"
 assert_contains "Fable is 5x Sonnet, not equal to it" "$([ "${f:-0}" -ge $(( ${s:-0} * 4 )) ] && echo yes || echo "no (fable=$f sonnet=$s)")" "yes"
 
+section "OAuth token handling"
+# The token must never reach curl's argv: a command line is readable from the
+# process table by any other user on the machine for as long as the request is
+# in flight. A curl shim on PATH records how it was called, so this is checked
+# offline, and against a fake credentials file rather than the real one.
+tokdir=$(mktemp -d)
+mkdir -p "$tokdir/bin"
+cat > "$tokdir/bin/curl" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$CURL_ARGV"
+cat > "$CURL_STDIN"
+exit 1   # fail the fetch: no cache should be written from a shim
+SHIM
+chmod +x "$tokdir/bin/curl"
+
+# Each run starts from no cache and no backoff, or the fetch is held back.
+tok_fetch() {
+  printf '%s\n' "$1" > "$tokdir/creds.json"
+  rm -rf "$tokdir/cache"; : > "$tokdir/argv"; : > "$tokdir/stdin"
+  echo "$BASE" | PATH="$tokdir/bin:$PATH" XDG_CACHE_HOME="$tokdir/cache" \
+    CURL_ARGV="$tokdir/argv" CURL_STDIN="$tokdir/stdin" \
+    CLAUDE_HUD_USAGE_API=1 CLAUDE_HUD_CALIB_MIN_PCT=101 CLAUDE_HUD_SNAPSHOT_DIR=none \
+    CLAUDE_HUD_CREDENTIALS="$tokdir/creds.json" bash statusline.sh >/dev/null 2>&1
+  sleep 1
+}
+
+tok_fetch '{"claudeAiOauth":{"accessToken":"fake-token-must-not-leak"}}'
+assert_not_contains "token never appears in curl's argv" \
+  "$(cat "$tokdir/argv")" "fake-token-must-not-leak"
+assert_contains "token is passed on stdin instead" \
+  "$(cat "$tokdir/stdin")" 'header "Authorization: Bearer fake-token-must-not-leak"'
+# Written as a regex so the leading dashes are not read as grep options.
+assert_matches "curl is told to read its config from stdin" "$(cat "$tokdir/argv")" '^[-]-config$'
+
+# A newline in the value would be read as a further config directive, so a
+# token outside the OAuth alphabet is refused before the parser sees it.
+tok_fetch '{"claudeAiOauth":{"accessToken":"abc\noutput = /tmp/pwned"}}'
+assert_not_contains "a token carrying a config directive is refused" \
+  "$(cat "$tokdir/stdin")" "output ="
+assert_contains "and no request is made at all" \
+  "$([ -s "$tokdir/argv" ] && echo made || echo none)" "none"
+rm -rf "$tokdir"
+
 section "Self-calibrated window"
 
 # When a calibration sample exists it is shown alongside the plan estimate,
